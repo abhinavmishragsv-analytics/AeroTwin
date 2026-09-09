@@ -8,30 +8,27 @@ class VadodaraAirport:
         self.flights = {}
 
     def pushback_and_depart(self, flight_id, risk_score):
-        # 3D Coordinates: Center (0,0). Runway spans from X:-50, Z:-50 to X:50, Z:50.
-        self.flights[flight_id] = {"id": flight_id, "x": 20, "y": 0, "z": -20, "heading": 0, "status": "pushback", "risk": risk_score}
+        # VABO Apron Coordinates
+        lat, lng = 22.3330, 73.2200
+        self.flights[flight_id] = {"id": flight_id, "lat": lat, "lng": lng, "heading": 45, "status": "pushback", "risk": risk_score}
         yield self.env.timeout(2)
         
-        # Taxi to runway threshold (-50, -50)
+        # Taxiing to Runway 04 threshold
         self.flights[flight_id]["status"] = "taxi"
-        self.flights[flight_id]["heading"] = math.pi / 2
-        for _ in range(5):
-            self.flights[flight_id]["x"] -= (70 / 5)
-            self.flights[flight_id]["z"] -= (30 / 5)
+        for _ in range(4):
+            lat += 0.0005
+            lng += 0.0008
+            self.flights[flight_id].update({"lat": lat, "lng": lng})
             yield self.env.timeout(1)
 
-        # Queue for Runway
+        # Takeoff Roll along Runway 04
         with self.runway.request() as req:
             yield req
             self.flights[flight_id]["status"] = "takeoff_roll"
-            self.flights[flight_id]["heading"] = -math.pi / 4 # 45 degrees
-            
-            # Takeoff roll to (50, 50)
-            for i in range(10):
-                self.flights[flight_id]["x"] += 10
-                self.flights[flight_id]["z"] += 10
-                if i > 5:
-                    self.flights[flight_id]["y"] += 2 # Rotate pitch and climb
+            for _ in range(6):
+                lat += 0.0010
+                lng += 0.0012
+                self.flights[flight_id].update({"lat": lat, "lng": lng})
                 yield self.env.timeout(1)
         
         self.flights[flight_id]["status"] = "airborne"
