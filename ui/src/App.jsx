@@ -1,77 +1,58 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react';
-import { Canvas, useFrame } from '@react-three/fiber';
-import { OrbitControls, Sky, PerspectiveCamera } from '@react-three/drei';
-import * as THREE from 'three';
-import VaboAirfield from './components/VaboAirfield';
-import AircraftRenderer from './components/AircraftRenderer';
+import Map from 'react-map-gl/maplibre';
+import * as maplibregl from 'maplibre-gl';
+import { DeckGL } from '@deck.gl/react';
+import { ScenegraphLayer } from '@deck.gl/mesh-layers';
+import { PathLayer, ScatterplotLayer } from '@deck.gl/layers';
+import 'maplibre-gl/dist/maplibre-gl.css';
 
-/**
- * Dynamic Multi-Mode Camera Controller
- */
-function CameraRig({ mode, targetAircraftPos, targetHeading }) {
-  const controlsRef = useRef();
+// MapTiler API Key from environment
+const MAPTILER_KEY = import.meta.env.VITE_MAPTILER_KEY || 'SZbWa44ht6gE8vB8WqhV';
 
-  useFrame(({ camera }) => {
-    if (mode === 'chase' && targetAircraftPos) {
-      // Position camera 25 units behind and 9 units above aircraft along heading
-      const heading = targetHeading || 0;
-      const dist = 28;
-      const height = 10;
-      const camX = targetAircraftPos.x - Math.sin(heading) * dist;
-      const camZ = targetAircraftPos.z - Math.cos(heading) * dist;
-      const camY = targetAircraftPos.y + height;
+// Exact Vadodara Airport (VABO) Initial Overview
+const INITIAL_VIEW_STATE = {
+  longitude: 73.2260,
+  latitude: 22.3350,
+  zoom: 15.5,
+  pitch: 65,
+  bearing: 44,
+  maxPitch: 85
+};
 
-      camera.position.lerp(new THREE.Vector3(camX, camY, camZ), 0.08);
-      // Look slightly ahead of the aircraft
-      const lookTarget = new THREE.Vector3(
-        targetAircraftPos.x + Math.sin(heading) * 15,
-        targetAircraftPos.y + 2,
-        targetAircraftPos.z + Math.cos(heading) * 15
-      );
-      camera.lookAt(lookTarget);
-    } else if (mode === 'tower') {
-      // Look from VABO Tower Cab (-75, 31, 10) down Runway 04
-      const towerPos = new THREE.Vector3(-75, 31, 10);
-      camera.position.lerp(towerPos, 0.08);
-      if (targetAircraftPos) {
-        camera.lookAt(targetAircraftPos.x, targetAircraftPos.y, targetAircraftPos.z);
-      } else {
-        camera.lookAt(0, 5, 0);
-      }
-    } else if (mode === 'threshold') {
-      // Low angle at Runway 04 threshold (-105, 3, -105)
-      const threshPos = new THREE.Vector3(-105, 3, -105);
-      camera.position.lerp(threshPos, 0.08);
-      if (targetAircraftPos) {
-        camera.lookAt(targetAircraftPos.x, targetAircraftPos.y, targetAircraftPos.z);
-      } else {
-        camera.lookAt(-50, 2, -50);
-      }
-    }
-  });
-
-  return (
-    <OrbitControls
-      ref={controlsRef}
-      makeDefault
-      enabled={mode === 'orbit'}
-      maxPolarAngle={Math.PI / 2.05}
-      minDistance={10}
-      maxDistance={350}
-    />
-  );
-}
+// Vadodara Runway 04/22 & Taxiway Alpha Geographic Paths
+const AIRPORT_GEOMETRY = [
+  // Runway 04/22 Centerline (2,469m)
+  {
+    path: [
+      [73.21930, 22.32970], // Runway 04 Threshold
+      [73.23610, 22.34560]  // Runway 22 Threshold
+    ],
+    color: [255, 255, 255, 180],
+    width: 6
+  },
+  // Taxiway Alpha Centerline (Apron to Runway 04)
+  {
+    path: [
+      [73.22600, 22.33550], // Stand 1
+      [73.22520, 22.33470], // Apron Taxi Line
+      [73.22280, 22.33250], // Alpha Midpoint
+      [73.22010, 22.33020], // Runway 04 Holding Point
+      [73.21930, 22.32970]  // Runway 04 Entry
+    ],
+    color: [250, 204, 21, 200], // Aviation Yellow
+    width: 4
+  }
+];
 
 export default function App() {
   const [twinState, setTwinState] = useState({ flights: [], time: 0 });
   const [connectionStatus, setConnectionStatus] = useState('CONNECTING');
+  const [viewState, setViewState] = useState(INITIAL_VIEW_STATE);
   const [cameraMode, setCameraMode] = useState('orbit'); // 'orbit' | 'chase' | 'tower' | 'threshold'
   const [customModelUrl, setCustomModelUrl] = useState(null);
   const [customModelName, setCustomModelName] = useState(null);
   const [isDragOver, setIsDragOver] = useState(false);
 
-  const primaryAircraftPos = useRef(new THREE.Vector3(0, 0, 0));
-  const primaryAircraftHeading = useRef(0);
   const fileInputRef = useRef(null);
 
   // WebSocket Live Simulation Stream
@@ -87,7 +68,7 @@ export default function App() {
           const parsed = JSON.parse(e.data);
           setTwinState(parsed);
         } catch (err) {
-          console.error('Error parsing telemetry JSON:', err);
+          console.error('Error parsing telemetry:', err);
         }
       };
       ws.onclose = () => {
@@ -105,12 +86,54 @@ export default function App() {
     };
   }, []);
 
-  // Handle GLB File Upload via Input or Drop
+  const primaryFlight = twinState.flights[0] || null;
+
+  // Dynamic Camera Modes
+  useEffect(() => {
+    if (!primaryFlight) return;
+
+    if (cameraMode === 'chase') {
+      // Smoothly follow behind the aircraft as it taxis and climbs
+      setViewState((prev) => ({
+        ...prev,
+        longitude: primaryFlight.lng,
+        latitude: primaryFlight.lat,
+        zoom: primaryFlight.altitude > 100 ? 15.0 : 16.5,
+        pitch: 75,
+        bearing: primaryFlight.heading || 44,
+        transitionDuration: 120
+      }));
+    } else if (cameraMode === 'tower') {
+      // Look from VABO ATC Tower (73.2250, 22.3362) overlooking Runway 04
+      setViewState((prev) => ({
+        ...prev,
+        longitude: 73.2250,
+        latitude: 22.3362,
+        zoom: 15.6,
+        pitch: 68,
+        bearing: 215,
+        transitionDuration: 300
+      }));
+    } else if (cameraMode === 'threshold') {
+      // Look from Runway 04 threshold looking down the runway
+      setViewState((prev) => ({
+        ...prev,
+        longitude: 73.2185,
+        latitude: 22.3288,
+        zoom: 16.8,
+        pitch: 80,
+        bearing: 44,
+        transitionDuration: 300
+      }));
+    }
+  }, [cameraMode, primaryFlight]);
+
+  // Handle Custom GLB File Upload
   const handleFileUpload = useCallback((file) => {
     if (!file) return;
     if (file.name.endsWith('.glb') || file.name.endsWith('.gltf')) {
-      const objectUrl = URL.createObjectURL(file);
-      setCustomModelUrl(objectUrl);
+      const url = URL.createObjectURL(file);
+      setCustomModelUrl(url);
       setCustomModelName(file.name);
     } else {
       alert('Please upload a 3D model with .glb or .gltf format.');
@@ -125,12 +148,89 @@ export default function App() {
     }
   };
 
-  const handlePositionUpdate = useCallback((pos, heading) => {
-    primaryAircraftPos.current.copy(pos);
-    primaryAircraftHeading.current = heading;
-  }, []);
+  // MapTiler 3D Satellite Map Style with 3D Terrain Elevation
+  const mapStyle = {
+    version: 8,
+    sources: {
+      'maptiler-satellite': {
+        type: 'raster',
+        tiles: [
+          `https://api.maptiler.com/maps/satellite/{z}/{x}/{y}.jpg?key=${MAPTILER_KEY}`
+        ],
+        tileSize: 256
+      },
+      'maptiler-terrain': {
+        type: 'raster-dem',
+        tiles: [
+          `https://api.maptiler.com/tiles/terrain-rgb-v2/{z}/{x}/{y}.webp?key=${MAPTILER_KEY}`
+        ],
+        tileSize: 512,
+        maxzoom: 14
+      }
+    },
+    layers: [
+      {
+        id: 'satellite-tiles',
+        type: 'raster',
+        source: 'maptiler-satellite',
+        minzoom: 0,
+        maxzoom: 22
+      }
+    ],
+    terrain: {
+      source: 'maptiler-terrain',
+      exaggeration: 1.5
+    },
+    sky: {
+      'sky-color': '#0284c7',
+      'sky-horizon-blend': 0.5,
+      'horizon-color': '#bae6fd',
+      'horizon-fog-blend': 0.5
+    }
+  };
 
-  const primaryFlight = twinState.flights[0] || null;
+  // Deck.GL Layers: 3D Aircraft Scenegraph + Trajectory Paths + Waypoint Markers
+  const layers = [
+    // Airfield Runway & Taxiway Centerline Guidelines
+    new PathLayer({
+      id: 'airport-guidelines',
+      data: AIRPORT_GEOMETRY,
+      getPath: (d) => d.path,
+      getColor: (d) => d.color,
+      getWidth: (d) => d.width,
+      widthUnits: 'meters',
+      billboard: false,
+      pickable: false
+    }),
+
+    // Ground Contact Shadow / Position Marker
+    new ScatterplotLayer({
+      id: 'aircraft-ground-shadow',
+      data: twinState.flights,
+      getPosition: (d) => [d.lng, d.lat, 0],
+      getRadius: (d) => (d.altitude > 10 ? 18 : 12),
+      radiusUnits: 'meters',
+      getFillColor: [15, 23, 42, 140],
+      stroked: true,
+      getLineColor: [56, 189, 248, 200],
+      getLineWidth: 2
+    }),
+
+    // 3D Airplane Model (Real GLB with PBR Materials & Dynamic Altitude Climb)
+    new ScenegraphLayer({
+      id: 'aircraft-3d-model',
+      data: twinState.flights,
+      scenegraph: customModelUrl || '/aircraft.glb',
+      getPosition: (d) => [d.lng, d.lat, d.altitude || 0],
+      getOrientation: (d) => [d.pitch || 0, -d.heading + 90, d.roll || 0],
+      sizeScale: 28,
+      _lighting: 'pbr',
+      transitions: {
+        getPosition: 120,
+        getOrientation: 120
+      }
+    })
+  ];
 
   return (
     <div
@@ -169,7 +269,7 @@ export default function App() {
             position: 'absolute',
             inset: 0,
             zIndex: 50,
-            background: 'rgba(2, 132, 199, 0.5)',
+            background: 'rgba(2, 132, 199, 0.6)',
             border: '4px dashed #38bdf8',
             display: 'flex',
             alignItems: 'center',
@@ -180,11 +280,11 @@ export default function App() {
           <div
             style={{
               background: '#0f172a',
-              padding: '30px 50px',
+              padding: '28px 48px',
               borderRadius: '16px',
               color: '#38bdf8',
               fontFamily: 'monospace',
-              fontSize: '1.4rem',
+              fontSize: '1.3rem',
               boxShadow: '0 20px 40px rgba(0,0,0,0.6)'
             }}
           >
@@ -193,32 +293,32 @@ export default function App() {
         </div>
       )}
 
-      {/* TOP-LEFT: Main Airport HUD & Telemetry */}
+      {/* TOP-LEFT: Airport Telemetry HUD */}
       <div
         style={{
           position: 'absolute',
           top: 20,
           left: 20,
           zIndex: 10,
-          background: 'rgba(15, 23, 42, 0.88)',
+          background: 'rgba(15, 23, 42, 0.9)',
           backdropFilter: 'blur(12px)',
-          border: '1px solid rgba(56, 189, 248, 0.3)',
+          border: '1px solid rgba(56, 189, 248, 0.35)',
           borderRadius: '14px',
           padding: '20px 24px',
           color: '#f8fafc',
           fontFamily: "'Inter', -apple-system, sans-serif",
-          boxShadow: '0 12px 36px rgba(0, 0, 0, 0.6)',
+          boxShadow: '0 12px 36px rgba(0, 0, 0, 0.7)',
           minWidth: '320px',
-          maxWidth: '400px'
+          maxWidth: '380px'
         }}
       >
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
           <div>
-            <h2 style={{ margin: 0, fontSize: '1.25rem', fontWeight: 700, letterSpacing: '0.5px', color: '#38bdf8' }}>
+            <h2 style={{ margin: 0, fontSize: '1.25rem', fontWeight: 700, color: '#38bdf8' }}>
               AEROTWIN • VABO
             </h2>
             <div style={{ fontSize: '0.75rem', color: '#94a3b8', marginTop: '2px' }}>
-              Vadodara Airport 3D Digital Twin
+              Vadodara Airport 3D Geospatial Twin
             </div>
           </div>
           <span
@@ -238,19 +338,21 @@ export default function App() {
 
         {/* Airport Metrics */}
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', margin: '12px 0' }}>
-          <div style={{ background: 'rgba(30, 41, 59, 0.6)', padding: '8px 12px', borderRadius: '8px' }}>
+          <div style={{ background: 'rgba(30, 41, 59, 0.7)', padding: '8px 12px', borderRadius: '8px' }}>
             <div style={{ fontSize: '0.7rem', color: '#94a3b8' }}>SIM TIME</div>
             <div style={{ fontSize: '1rem', fontWeight: 600, color: '#f8fafc' }}>T+{twinState.time}s</div>
           </div>
-          <div style={{ background: 'rgba(30, 41, 59, 0.6)', padding: '8px 12px', borderRadius: '8px' }}>
-            <div style={{ fontSize: '0.7rem', color: '#94a3b8' }}>ACTIVE TRAFFIC</div>
-            <div style={{ fontSize: '1rem', fontWeight: 600, color: '#38bdf8' }}>{twinState.flights.length} Aircraft</div>
+          <div style={{ background: 'rgba(30, 41, 59, 0.7)', padding: '8px 12px', borderRadius: '8px' }}>
+            <div style={{ fontSize: '0.7rem', color: '#94a3b8' }}>RUNWAY 04/22</div>
+            <div style={{ fontSize: '0.95rem', fontWeight: 600, color: '#38bdf8' }}>
+              {primaryFlight ? primaryFlight.status.toUpperCase() : 'ACTIVE'}
+            </div>
           </div>
         </div>
 
-        {/* Active Flights List */}
+        {/* Active Flights Stream */}
         <div style={{ fontSize: '0.75rem', color: '#94a3b8', fontWeight: 600, marginBottom: '6px' }}>
-          AIRPORT TRAFFIC STREAM
+          ACTIVE FLIGHT TELEMETRY
         </div>
         <div style={{ maxHeight: '180px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '6px' }}>
           {twinState.flights.length === 0 ? (
@@ -264,7 +366,7 @@ export default function App() {
                 style={{
                   padding: '8px 12px',
                   borderRadius: '8px',
-                  background: f.risk > 0.7 ? 'rgba(239, 68, 68, 0.15)' : 'rgba(15, 23, 42, 0.7)',
+                  background: f.risk > 0.7 ? 'rgba(239, 68, 68, 0.15)' : 'rgba(15, 23, 42, 0.8)',
                   border: `1px solid ${f.risk > 0.7 ? 'rgba(239, 68, 68, 0.4)' : 'rgba(56, 189, 248, 0.2)'}`,
                   display: 'flex',
                   justifyContent: 'space-between',
@@ -286,7 +388,7 @@ export default function App() {
                   </span>
                 </div>
                 <div style={{ textAlign: 'right', fontSize: '0.75rem', color: '#94a3b8' }}>
-                  <div>{f.altitude || 0} ft • {f.speed || 0} kt</div>
+                  <div>{f.altitude || 0}m • {f.speed || 0} kt</div>
                   <div style={{ color: f.risk > 0.7 ? '#f87171' : '#4ade80' }}>
                     Risk: {f.risk.toFixed(2)}
                   </div>
@@ -297,20 +399,20 @@ export default function App() {
         </div>
       </div>
 
-      {/* TOP-RIGHT: GLB Upload & Model Customizer */}
+      {/* TOP-RIGHT: 3D Aircraft Model Uploader */}
       <div
         style={{
           position: 'absolute',
           top: 20,
           right: 20,
           zIndex: 10,
-          background: 'rgba(15, 23, 42, 0.88)',
+          background: 'rgba(15, 23, 42, 0.9)',
           backdropFilter: 'blur(12px)',
-          border: '1px solid rgba(56, 189, 248, 0.3)',
+          border: '1px solid rgba(56, 189, 248, 0.35)',
           borderRadius: '14px',
           padding: '16px 20px',
           color: '#f8fafc',
-          boxShadow: '0 12px 36px rgba(0, 0, 0, 0.6)',
+          boxShadow: '0 12px 36px rgba(0, 0, 0, 0.7)',
           width: '280px'
         }}
       >
@@ -347,7 +449,7 @@ export default function App() {
           </div>
         ) : (
           <div style={{ fontSize: '0.75rem', color: '#94a3b8', marginBottom: '12px', lineHeight: '1.4' }}>
-            Currently using high-detail default passenger jet. You can upload any <strong>.glb</strong> or <strong>.gltf</strong> model.
+            Currently rendering default 3D jet. You can upload your own <strong>.glb</strong> or <strong>.gltf</strong> model.
           </div>
         )}
 
@@ -378,7 +480,7 @@ export default function App() {
         </div>
       </div>
 
-      {/* BOTTOM-CENTER: Cinematic Camera Mode Switcher */}
+      {/* BOTTOM-CENTER: Cinematic Camera Mode Controls */}
       <div
         style={{
           position: 'absolute',
@@ -388,12 +490,12 @@ export default function App() {
           zIndex: 10,
           background: 'rgba(15, 23, 42, 0.92)',
           backdropFilter: 'blur(16px)',
-          border: '1px solid rgba(56, 189, 248, 0.3)',
+          border: '1px solid rgba(56, 189, 248, 0.35)',
           borderRadius: '30px',
           padding: '6px 10px',
           display: 'flex',
           gap: '8px',
-          boxShadow: '0 12px 36px rgba(0, 0, 0, 0.6)'
+          boxShadow: '0 12px 36px rgba(0, 0, 0, 0.7)'
         }}
       >
         {[
@@ -429,59 +531,19 @@ export default function App() {
         })}
       </div>
 
-      {/* 3D WebGL Canvas */}
-      <Canvas shadows camera={{ position: [-80, 50, 80], fov: 48 }}>
-        <PerspectiveCamera makeDefault position={[-80, 50, 80]} fov={48} />
-        
-        {/* Dynamic Sky and Lighting */}
-        <Sky
-          distance={450000}
-          sunPosition={[120, 45, 120]}
-          inclination={0.49}
-          azimuth={0.25}
-          turbidity={8}
-          rayleigh={2}
-        />
-        <ambientLight intensity={0.65} />
-        <hemisphereLight skyColor="#bae6fd" groundColor="#334155" intensity={0.4} />
-        <directionalLight
-          position={[100, 120, 80]}
-          intensity={1.6}
-          castShadow
-          shadow-mapSize-width={2048}
-          shadow-mapSize-height={2048}
-          shadow-camera-far={400}
-          shadow-camera-left={-150}
-          shadow-camera-right={150}
-          shadow-camera-top={150}
-          shadow-camera-bottom={-150}
-          shadow-bias={-0.0001}
-        />
-
-        {/* Realistic Distance Fog */}
-        <fogExp2 attach="fog" args={['#0f172a', 0.0022]} />
-
-        {/* Vadodara Airport (VABO) 3D Airfield Architecture */}
-        <VaboAirfield />
-
-        {/* Active Aircraft with Flight Dynamics & Uploaded GLB Support */}
-        {twinState.flights.map((flight, idx) => (
-          <AircraftRenderer
-            key={flight.id}
-            data={flight}
-            customModelUrl={customModelUrl}
-            isPrimary={idx === 0}
-            onPositionUpdate={idx === 0 ? handlePositionUpdate : null}
-          />
-        ))}
-
-        {/* Camera Rig (Orbit, Chase, Tower, Runway Threshold) */}
-        <CameraRig
-          mode={cameraMode}
-          targetAircraftPos={primaryFlight ? primaryAircraftPos.current : null}
-          targetHeading={primaryFlight ? primaryAircraftHeading.current : null}
-        />
-      </Canvas>
+      {/* MapLibre + Deck.GL 3D Geospatial Airfield */}
+      <DeckGL
+        viewState={viewState}
+        onViewStateChange={(e) => {
+          if (cameraMode === 'orbit') {
+            setViewState(e.viewState);
+          }
+        }}
+        controller={cameraMode === 'orbit'}
+        layers={layers}
+      >
+        <Map mapLib={maplibregl} mapStyle={mapStyle} />
+      </DeckGL>
     </div>
   );
 }
