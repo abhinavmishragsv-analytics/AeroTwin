@@ -1,0 +1,10 @@
+venv/
+node_modules/
+.env
+__pycache__/
+*.pyc
+core/models/*.pkl
+core/models/*.onnx
+notebooks/.ipynb_checkpoints/
+ui/dist/
+.DS_Store
