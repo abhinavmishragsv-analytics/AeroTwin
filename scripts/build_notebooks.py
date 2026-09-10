@@ -62,7 +62,7 @@ def build_01():
     cells = []
 
     cells.append(("code", """\
-!pip install -q prophet==1.1.6 pandas==2.2.3 numpy==1.26.4 joblib==1.4.2 requests==2.32.3
+!pip install -q prophet pandas numpy joblib requests
 """))
 
     cells.append(("markdown", """\
@@ -240,7 +240,7 @@ def build_02():
     cells = []
 
     cells.append(("code", """\
-!pip install -q xgboost==2.1.3 scikit-learn==1.5.2 pandas==2.2.3 numpy==1.26.4 joblib==1.4.2 requests==2.32.3
+!pip install -q xgboost scikit-learn pandas numpy joblib requests
 """))
 
     cells.append(("markdown", """\
@@ -372,7 +372,7 @@ def build_03():
     cells = []
 
     cells.append(("code", """\
-!pip install -q scikit-learn==1.5.2 pandas==2.2.3 numpy==1.26.4 joblib==1.4.2 requests==2.32.3
+!pip install -q scikit-learn pandas numpy joblib requests
 """))
 
     cells.append(("markdown", """\
@@ -484,7 +484,7 @@ def build_04():
     cells = []
 
     cells.append(("code", """\
-!pip install -q networkx==3.4.2 pandas==2.2.3 joblib==1.4.2 requests==2.32.3
+!pip install -q networkx pandas joblib requests
 """))
 
     cells.append(("markdown", """\
@@ -600,7 +600,7 @@ def build_07():
     cells = []
 
     cells.append(("code", """\
-!pip install -q scikit-learn==1.5.2 pandas==2.2.3 numpy==1.26.4 joblib==1.4.2 requests==2.32.3
+!pip install -q scikit-learn pandas numpy joblib requests
 """))
 
     cells.append(("markdown", """\
@@ -739,7 +739,7 @@ print(f"Saved {PKL_NAME}")
 def build_05():
     cells = []
     cells.append(("code", """\
-!pip install -q simpy==4.1.1
+!pip install -q simpy
 """))
     cells.append(("markdown", """\
 ## Standalone evaluation harness for the SimPy queueing engine
