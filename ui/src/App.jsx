@@ -9,6 +9,10 @@ import 'maplibre-gl/dist/maplibre-gl.css';
 // MapTiler API Key from environment
 const MAPTILER_KEY = import.meta.env.VITE_MAPTILER_KEY || 'SZbWa44ht6gE8vB8WqhV';
 
+// FastAPI backend base URL (REST + WebSocket share the same host:port)
+const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000';
+const WS_URL = API_BASE.replace(/^http/, 'ws') + '/ws/twin';
+
 // Exact Vadodara Airport (VABO) Initial Overview
 const INITIAL_VIEW_STATE = {
   longitude: 73.2260,
@@ -44,6 +48,17 @@ const AIRPORT_GEOMETRY = [
   }
 ];
 
+// Disruptions the ATC console can inject - each maps 1:1 to core/twin_sim.py's
+// inject_disruption() types. duration_minutes is a sensible default; the twin
+// clamps it server-side to [0, 180].
+const DISRUPTION_ACTIONS = [
+  { type: 'runway_closure', duration_minutes: 15, label: 'Runway Closure', icon: '🚧' },
+  { type: 'ground_stop', duration_minutes: 10, label: 'Ground Stop', icon: '🛑' },
+  { type: 'fog', duration_minutes: 20, label: 'Fog / Cat III', icon: '🌫️' },
+  { type: 'high_wind', duration_minutes: 15, label: 'High Crosswind', icon: '💨' },
+  { type: 'clear', duration_minutes: 0, label: 'Clear All', icon: '✅' }
+];
+
 export default function App() {
   const [twinState, setTwinState] = useState({ flights: [], time: 0 });
   const [connectionStatus, setConnectionStatus] = useState('CONNECTING');
@@ -52,8 +67,33 @@ export default function App() {
   const [customModelUrl, setCustomModelUrl] = useState(null);
   const [customModelName, setCustomModelName] = useState(null);
   const [isDragOver, setIsDragOver] = useState(false);
+  const [disruptionBusy, setDisruptionBusy] = useState(null);   // type currently in-flight, or null
+  const [disruptionError, setDisruptionError] = useState(null);
 
   const fileInputRef = useRef(null);
+
+  // Bi-directional control: POST a disruption to the FastAPI twin. The SimPy
+  // simulation mutates immediately server-side and the next WebSocket frame
+  // reflects it for every connected client.
+  const injectDisruption = useCallback(async (action) => {
+    setDisruptionBusy(action.type);
+    setDisruptionError(null);
+    try {
+      const res = await fetch(`${API_BASE}/api/disrupt`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: action.type, duration_minutes: action.duration_minutes })
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.detail || `HTTP ${res.status}`);
+      }
+    } catch (err) {
+      setDisruptionError(err.message || 'Failed to reach twin backend');
+    } finally {
+      setDisruptionBusy(null);
+    }
+  }, []);
 
   // WebSocket Live Simulation Stream
   useEffect(() => {
@@ -61,7 +101,7 @@ export default function App() {
     let timer;
 
     const connect = () => {
-      ws = new WebSocket('ws://localhost:8000/ws/twin');
+      ws = new WebSocket(WS_URL);
       ws.onopen = () => setConnectionStatus('ONLINE');
       ws.onmessage = (e) => {
         try {
@@ -87,6 +127,7 @@ export default function App() {
   }, []);
 
   const primaryFlight = twinState.flights[0] || null;
+  const twin = twinState.twin || null;
 
   // Dynamic Camera Modes
   useEffect(() => {
@@ -344,11 +385,51 @@ export default function App() {
           </div>
           <div style={{ background: 'rgba(30, 41, 59, 0.7)', padding: '8px 12px', borderRadius: '8px' }}>
             <div style={{ fontSize: '0.7rem', color: '#94a3b8' }}>RUNWAY 04/22</div>
+            <div
+              style={{
+                fontSize: '0.95rem',
+                fontWeight: 600,
+                color: twin?.runway_closed || twin?.ground_stop ? '#f87171' : '#4ade80'
+              }}
+            >
+              {twin?.ground_stop ? 'GROUND STOP' : twin?.runway_closed ? 'CLOSED' : 'OPEN'}
+            </div>
+          </div>
+          <div style={{ background: 'rgba(30, 41, 59, 0.7)', padding: '8px 12px', borderRadius: '8px' }}>
+            <div style={{ fontSize: '0.7rem', color: '#94a3b8' }}>WEATHER</div>
+            <div
+              style={{
+                fontSize: '0.95rem',
+                fontWeight: 600,
+                color: twin?.weather?.condition === 'CLEAR' ? '#4ade80' : '#facc15'
+              }}
+            >
+              {twin?.weather?.condition || 'CLEAR'}
+            </div>
+          </div>
+          <div style={{ background: 'rgba(30, 41, 59, 0.7)', padding: '8px 12px', borderRadius: '8px' }}>
+            <div style={{ fontSize: '0.7rem', color: '#94a3b8' }}>QUEUE DEPTH</div>
             <div style={{ fontSize: '0.95rem', fontWeight: 600, color: '#38bdf8' }}>
-              {primaryFlight ? primaryFlight.status.toUpperCase() : 'ACTIVE'}
+              {twin?.queue_depth ?? 0} aircraft
             </div>
           </div>
         </div>
+
+        {/* Recent Disruption Log */}
+        {twin?.disruptions?.length > 0 && (
+          <div style={{ marginBottom: '12px' }}>
+            <div style={{ fontSize: '0.75rem', color: '#94a3b8', fontWeight: 600, marginBottom: '6px' }}>
+              ATC EVENT LOG
+            </div>
+            <div style={{ maxHeight: '70px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '4px' }}>
+              {twin.disruptions.slice(0, 3).map((d, i) => (
+                <div key={i} style={{ fontSize: '0.72rem', color: '#cbd5e1' }}>
+                  <span style={{ color: '#64748b' }}>T+{d.time}s</span> — {d.label}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Active Flights Stream */}
         <div style={{ fontSize: '0.75rem', color: '#94a3b8', fontWeight: 600, marginBottom: '6px' }}>
@@ -477,6 +558,68 @@ export default function App() {
         </button>
         <div style={{ fontSize: '0.7rem', color: '#64748b', textAlign: 'center', marginTop: '6px' }}>
           or drag & drop file anywhere on screen
+        </div>
+      </div>
+
+      {/* BOTTOM-RIGHT: ATC Disruption Console - the "write" side of the bi-directional twin */}
+      <div
+        style={{
+          position: 'absolute',
+          bottom: 24,
+          right: 20,
+          zIndex: 10,
+          background: 'rgba(15, 23, 42, 0.92)',
+          backdropFilter: 'blur(16px)',
+          border: '1px solid rgba(56, 189, 248, 0.35)',
+          borderRadius: '14px',
+          padding: '14px 16px',
+          color: '#f8fafc',
+          boxShadow: '0 12px 36px rgba(0, 0, 0, 0.7)',
+          width: '220px'
+        }}
+      >
+        <div style={{ fontSize: '0.8rem', fontWeight: 700, color: '#38bdf8', marginBottom: '10px' }}>
+          🗼 ATC DISRUPTION CONSOLE
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+          {DISRUPTION_ACTIONS.map((action) => {
+            const isClear = action.type === 'clear';
+            const isBusy = disruptionBusy === action.type;
+            return (
+              <button
+                key={action.type}
+                onClick={() => injectDisruption(action)}
+                disabled={disruptionBusy !== null}
+                title={isClear ? 'Clear all active disruptions' : `Inject for ${action.duration_minutes} min`}
+                style={{
+                  background: isClear ? 'rgba(34, 197, 94, 0.15)' : 'rgba(239, 68, 68, 0.12)',
+                  border: `1px solid ${isClear ? 'rgba(34, 197, 94, 0.4)' : 'rgba(239, 68, 68, 0.35)'}`,
+                  color: isClear ? '#4ade80' : '#fca5a5',
+                  borderRadius: '8px',
+                  padding: '8px 10px',
+                  fontSize: '0.78rem',
+                  fontWeight: 600,
+                  cursor: disruptionBusy !== null ? 'wait' : 'pointer',
+                  opacity: disruptionBusy !== null && !isBusy ? 0.5 : 1,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  transition: 'all 0.15s ease'
+                }}
+              >
+                <span>{action.icon} {action.label}</span>
+                {!isClear && <span style={{ color: '#94a3b8', fontWeight: 400 }}>{action.duration_minutes}m</span>}
+              </button>
+            );
+          })}
+        </div>
+        {disruptionError && (
+          <div style={{ fontSize: '0.7rem', color: '#f87171', marginTop: '8px' }}>
+            ⚠ {disruptionError}
+          </div>
+        )}
+        <div style={{ fontSize: '0.65rem', color: '#64748b', marginTop: '8px', lineHeight: '1.3' }}>
+          Every action here mutates the live SimPy twin - watch aircraft react in real time.
         </div>
       </div>
 

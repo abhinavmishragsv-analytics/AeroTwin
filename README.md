@@ -1,140 +1,131 @@
 ```
-   ▄▄▄       ▓█████  ██▀███   ▒█████      ▄▄▄█████▓ █     █░ ██▓ ███▄    █
-  ▒████▄     ▓█   ▀ ▓██ ▒ ██▒▒██▒  ██▒    ▓  ██▒ ▓▒▓█░ █ ░█░▓██▒ ██ ▀█   █
-  ▒██  ▀█▄   ▒███   ▓██ ░▄█ ▒▒██░  ██▒    ▒ ▓██░ ▒░▒█░ █ ░█ ▒██▒▓██  ▀█ ██▒
-  ░██▄▄▄▄██  ▒▓█  ▄  ▒██▀▀█▄  ▒██   ██░    ░ ▓██▓ ░ ░█░ █ ░█ ░██░▓██▒  ▐▌██▒
-   ▓█   ▓██▒ ░▒████▒ ░██▓ ▒██▒░ ████▓▒░      ▒██▒ ░ ░░██▒██▓ ░██░▒██░   ▓██░
-   ▒▒   ▓▒█░ ░░ ▒░ ░ ░ ▒▓ ░▒▓░░ ▒░▒░▒░       ▒ ░░   ░ ▓░▒ ▒  ░▓  ░ ▒░   ▒ ▒
+   AEROTWIN
 ```
 
-> `AI Digital Twin for Airport Ground & Network Delay Management`
-> `status: [ IN_DEVELOPMENT ]` `domain: ITS × Aviation × Digital Twin`
+> A true, bi-directional 3D digital twin of Vadodara Airport (VABO)
+> status: RUNNABLE END-TO-END | domain: ITS x Aviation x Digital Twin
 
 ---
 
-## `> about`
+## About
 
-AeroTwin is an AI-powered digital twin for airport ground operations and
-flight-network delay dynamics. It predicts delay risk, models how
-disruption cascades across a flight network, and lets you simulate
-"what-if" interventions — a runway closure, a fog event, a schedule
-shock — before they happen in the real world.
+AeroTwin is a closed-loop digital twin of ground operations at Vadodara
+Airport (VABO) - not a flight tracker, not a 3D dashboard skinned over
+static data. The "twin" is a live SimPy discrete-event simulation running
+inside a FastAPI server: every aircraft moves through real gate -> pushback
+-> taxi -> hold -> runway -> climb-out states, at exact WGS84 coordinates
+for VABO's Runway 04/22 and Taxiway Alpha. The 3D frontend (React + Deck.GL
++ MapLibre satellite imagery) is strictly a visualization layer over that
+live state.
 
-Built as a course deliverable, scoped for real-world honesty: India does
-not publish flight-level delay records the way the US does, so this
-project uses a **hybrid data strategy** — global flight-level trajectory
-data to power the twin, Indian government aggregate data to ground the
-causal analysis, and a benchmark dataset to validate the modelling
-approach at scale.
+It is **bi-directional**: inject a runway closure, a ground stop, fog, or a
+crosswind event from the UI's ATC console, and the FastAPI layer mutates the
+one running simulation - every in-progress aircraft reacts on its next
+simulation step (holds short, queues, or climbs out late), and every
+connected browser sees it within one WebSocket frame.
+
+Five machine-learning modules - trained in Google Colab on public,
+no-login-required datasets - feed real-time risk into that simulation:
+delay forecasting, taxi-time prediction, congestion tiering, network
+criticality, and weather ground-stop probability. None of them are required
+to run the twin: `core/models.py` falls back to statistically-reasonable
+synthetic predictions for any module you haven't trained yet, so the
+simulation is fully playable from a fresh clone.
+
+---
+
+## Architecture
 
 ```
-data > assumptions
-decisions, not dashboards
+core/            FastAPI WebSocket server + SimPy simulation + ML inference
+  main.py          - single persistent simulation, REST + WebSocket API
+  twin_sim.py       - the SimPy engine: gate/pushback/taxi/hold/runway/climb
+  models.py         - ML model registry (loads .pkl, falls back to synthetic)
+  config.py         - VABO geometry + simulation constants, single source of truth
+  models/           - drop trained .pkl artifacts here (gitignored)
+
+ui/              Vite + React 19 + Deck.GL + MapLibre GL JS frontend
+  src/App.jsx       - 3D scene, telemetry HUD, ATC disruption console
+
+notebooks/       Google Colab training notebooks (generate via scripts/build_notebooks.py)
+scripts/
+  build_notebooks.py    - regenerates all notebooks/*.ipynb from scratch
+  make_aircraft_glb.py  - procedurally generates a placeholder aircraft.glb
+```
+
+| module | function | technique | notebook |
+|---|---|---|---|
+| 01_forecast | macro delay-risk forecasting | Prophet (+ seasonal-naive fallback) | 01_forecast_macro.ipynb |
+| 02_taxitime | taxi/ground-delay duration prediction | XGBoost | 02_taxitime_xgboost.ipynb |
+| 03_cluster | congestion-risk tiering (LOW/MODERATE/HIGH) | K-Means | 03_cluster_kmeans.ipynb |
+| 04_graph | route-network structural criticality | NetworkX (betweenness/PageRank) | 04_graph_networkx.ipynb |
+| 05_twin | live simulation + disruption injection | SimPy (lives in core/twin_sim.py) | 05_twin_simpy.ipynb (eval harness only) |
+| 07_weather | Cat III ground-stop probability | RandomForest | 07_weather_disruption.ipynb |
+
+(Module 06 - predictive maintenance - is out of scope for this build.)
+
+---
+
+## Stack
+
+```
+core:  python 3.11+ | fastapi | uvicorn | simpy | pydantic | websockets
+ml:    prophet | xgboost | scikit-learn | networkx | joblib | pandas
+ui:    react 19 | vite | deck.gl | maplibre-gl | react-map-gl
 ```
 
 ---
 
-## `> problem`
+## Data sources (all public, no login required)
 
-| # | issue | impact |
+| dataset | source | used by |
 |---|---|---|
-| 01 | Delay propagation | one late aircraft cascades delay across its network |
-| 02 | Taxi-time unpredictability | fuel waste, runway queuing |
-| 03 | Gate/stand allocation inefficiency | longer turnaround, apron congestion |
-| 04 | Fog & weather disruption (esp. North India) | reactive, not model-driven response |
-| 05 | No accessible what-if simulation tooling | disruptions are handled live, not pre-tested |
+| BTS Airline Delay Cause (mirror) | github.com/YBI-Foundation/Dataset | Modules 01, 02 |
+| OpenFlights airports/routes | github.com/jpatokal/openflights | Modules 03, 04 |
+| IEM ASOS/METAR archive (IN__ASOS network) | mesonet.agron.iastate.edu | Module 07 |
+
+Every notebook attempts the real, live download first and falls back to a
+structurally-identical synthetic dataset if the source is ever unreachable
+(rate-limited, moved, offline grading environment) - so every notebook
+completes and produces a usable `.pkl` regardless of network conditions.
 
 ---
 
-## `> architecture`
+## Run
 
-```
-[ raw data ] → [ forecasting ] → [ clustering ] → [ graph analysis ] → [ CARI index ] → [ digital twin sim ]
-```
-
-| module | function | technique |
-|---|---|---|
-| `01_forecast` | delay-risk prediction by airport/airline/month | Prophet |
-| `02_taxitime` | per-flight taxi-out/in duration prediction | XGBoost / Random Forest |
-| `03_cluster` | congestion-risk grouping by airport/time-slot | K-Means |
-| `04_graph` | delay-propagation & route criticality | NetworkX |
-| `05_twin` | live simulation + disruption injection | SimPy + Streamlit |
-| `06_maintenance` *(optional)* | engine remaining-useful-life estimation | LSTM / Random Forest |
-
-**CARI — Composite Airport Resilience Index**
-a single explainable 0–100 score per airport, combining delay risk,
-weather exposure, congestion, and network criticality. Same weighted-index
-methodology used in the author's DFCCIL GCT-DSS project (115 stations,
-scored 92/100), applied here to Indian airports (DEL / BOM / BLR).
-
----
-
-## `> stack`
-
-```
-python 3.11 · prophet · xgboost · scikit-learn
-networkx · simpy · shap · streamlit · pandas · geopandas
-```
-
----
-
-## `> data_sources`
-
-| dataset | source | use |
-|---|---|---|
-| OpenSky Network | opensky-network.org | flight-level trajectory → twin + taxi-time |
-| DGCA delay-by-reason | dataful.in / data.gov.in | causal delay grounding (India) |
-| india-aviation-traffic | github.com/Vonter (ODbL) | traffic volume cross-check |
-| BTS On-Time Performance | transtats.bts.gov | methodology benchmark (US, flight-level) |
-| IMD / Iowa Mesonet METAR | mesonet.agron.iastate.edu | weather exposure scoring |
-| OurAirports | ourairports.com | runway/gate geometry |
-| NASA C-MAPSS *(optional)* | data.nasa.gov | engine RUL, Module 06 |
-
-> ⚠ datasets retain their own original licenses — see below.
-
----
-
-## `> run`
+See the step-by-step guide provided alongside this repo for the full local +
+Colab workflow. Short version:
 
 ```bash
-git clone https://github.com/<your-username>/aerotwin.git
-cd aerotwin
-python -m venv venv && source venv/bin/activate   # or venv\Scripts\activate on Windows
+# 1. Backend
+python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
-streamlit run app.py
+uvicorn core.main:app --reload --port 8000
+
+# 2. Frontend (separate terminal)
+cd ui
+npm install
+npm run dev
 ```
+
+Then open the printed Vite URL (typically http://localhost:5173). The twin
+runs immediately with synthetic ML fallbacks - train the notebooks in
+`notebooks/` on Google Colab and drop the resulting `.pkl` files into
+`core/models/` whenever you want real trained predictions instead.
 
 ---
 
-## `> roadmap`
+## License
 
-- [x] project proposal & architecture design
-- [ ] data acquisition — OpenSky, DGCA, METAR (DEL/BOM/BLR)
-- [ ] Module 01–02 — forecasting + taxi-time models
-- [ ] Module 03–04 — clustering + propagation graph
-- [ ] CARI composite index
-- [ ] Module 05 — digital twin + simulation dashboard
-- [ ] optional Module 06 — predictive maintenance
-- [ ] deployment (Streamlit Cloud)
+Code in this repository is released under the MIT License - see LICENSE.
+Datasets referenced above are not covered by this license and remain under
+their original terms (BTS/US Government open data, OpenFlights' attribution
+terms, IEM's open METAR archive terms).
 
 ---
 
-## `> license`
+## Author
 
-Code in this repository is released under the **MIT License** — see
-[`LICENSE`](./LICENSE). Datasets used by this project are **not**
-covered by this license and remain under their original terms
-(OpenSky Network terms of use, ODbL for `india-aviation-traffic`,
-US Government Open Data / public domain for BTS and NASA C-MAPSS).
-
----
-
-## `> author`
-
-**Abhinav Mishra**
-B.Tech, AI & Data Science · Gati Shakti Vishwavidyalaya (GSV)
-Head, TechnoCrats · ex-DFCCIL, ex-Indian Railways (DRM Office, S&T)
-
-```
-[ EOF ]
-```
+Abhinav Mishra
+B.Tech, AI & Data Science - Gati Shakti Vishwavidyalaya (GSV)
+Head, TechnoCrats - ex-DFCCIL, ex-Indian Railways (DRM Office, S&T)
