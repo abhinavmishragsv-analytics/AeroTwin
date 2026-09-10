@@ -1,20 +1,34 @@
 # --- Core digital twin server (core/) ---
-fastapi==0.115.6
-uvicorn[standard]==0.34.0
-simpy==4.1.1
-pydantic==2.10.4
-websockets==14.1
-python-dotenv==1.0.1
+# Ranges (not hard pins) so pip can pick whichever version has a prebuilt
+# wheel for YOUR actual Python interpreter/platform, instead of trying to
+# compile from source (the #1 cause of Windows install failures).
+fastapi>=0.115,<0.120
+uvicorn[standard]>=0.34,<0.40
+simpy>=4.1,<5
+pydantic>=2.9,<3
+websockets>=13,<16
+python-dotenv>=1.0,<2
 
 # --- ML inference (only needed if you drop trained .pkl files into core/models/) ---
-joblib==1.4.2
-numpy==1.26.4
-scikit-learn==1.5.2
-xgboost==2.1.3
-networkx==3.4.2
-prophet==1.1.6
-pandas==2.2.3
+# Lower bounds match Google Colab's current default stack (numpy 2.x, etc.),
+# since that's almost certainly what trained the .pkl files you're loading -
+# matching versions locally avoids joblib/pickle compatibility warnings.
+joblib>=1.4,<2
+numpy>=2.0,<3
+scikit-learn>=1.5,<2
+xgboost>=2.1,<3
+networkx>=3.3,<4
+prophet>=1.1,<2
+pandas>=2.2,<3
 
 # --- Notebook tooling (scripts/build_notebooks.py) ---
-nbformat==5.10.4
-requests==2.32.3
+nbformat>=5.10,<6
+requests>=2.32,<3
+
+# IMPORTANT (Windows users): install this with standard CPython from
+# python.org (3.11, 3.12, or 3.13) - NOT PyPy. numpy/scikit-learn/xgboost do
+# not reliably ship prebuilt PyPy wheels on Windows, which forces pip to
+# compile from source and commonly fails without a modern MinGW/MSVC toolchain.
+# Check what your venv is actually running with:
+#   python -c "import sys; print(sys.version)"
+# It should say "... [MSC ... 64 bit (AMD64)]" (CPython), not mention PyPy.
