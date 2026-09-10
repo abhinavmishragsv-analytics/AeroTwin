@@ -37,6 +37,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Every ~ARRIVAL_EVERY_NTH departure spawn cycle, spawn an arrival instead -
+# keeps single-runway ATC contention visible (arrivals and departures both
+# request the same simpy.Resource in core/twin_sim.py) without overcrowding
+# the small VABO apron.
+ARRIVAL_EVERY_NTH = 3
+REAP_INTERVAL_S = 5.0        # how often (real seconds) to sweep terminal flights
+TERMINAL_MAX_AGE_S = 45.0    # how long an airborne/parked flight lingers before cleanup
+
 
 class SimulationHub:
     """Owns the single, always-running SimPy environment and its WebSocket audience."""
@@ -46,6 +54,7 @@ class SimulationHub:
         self.airport = VadodaraAirport(self.env)
         self.clients: set[WebSocket] = set()
         self._flight_counter = 101
+        self._spawn_count = 0
         self._tasks_started = False
 
     async def start(self):
@@ -56,29 +65,56 @@ class SimulationHub:
         asyncio.create_task(self._simulation_loop())
         logger.info("AeroTwin simulation hub started for %s", AIRPORT_ICAO)
 
+    def _spawn(self, is_arrival: bool):
+        airline_code = random.choice(AIRLINE_CODES)
+        flight_id = f"{airline_code}-{self._flight_counter}"
+        self._flight_counter += 1
+        self._spawn_count += 1
+        if is_arrival:
+            self.env.process(self.airport.land_and_taxi_in(flight_id))
+        else:
+            self.env.process(self.airport.pushback_and_depart(flight_id))
+
     async def _flight_generator(self):
         # Seed the apron with one aircraft immediately so the twin isn't empty on first connect
-        self.env.process(self.airport.pushback_and_depart(f"6E-{self._flight_counter}"))
-        self._flight_counter += 1
+        self._spawn(is_arrival=False)
 
         while True:
             await asyncio.sleep(BASE_FLIGHT_SPAWN_INTERVAL_S)
-            airline_code = random.choice(AIRLINE_CODES)
-            self.env.process(self.airport.pushback_and_depart(f"{airline_code}-{self._flight_counter}"))
-            self._flight_counter += 1
+            is_arrival = self._spawn_count % ARRIVAL_EVERY_NTH == (ARRIVAL_EVERY_NTH - 1)
+            self._spawn(is_arrival=is_arrival)
 
     async def _simulation_loop(self):
+        """Advance the SimPy clock by a full real-time-mapped window every tick
+        (not a single event), so every concurrently-active aircraft's position
+        gets updated on every broadcast frame instead of taking turns - this is
+        what keeps multi-aircraft motion smooth rather than jittery."""
         period = 1.0 / STREAM_HZ
+        last_reap = time.monotonic()
         while True:
-            if self.env.peek() != float("inf"):
-                self.env.step()
-            await self._broadcast()
+            try:
+                target_time = self.env.now + period
+                self.env.run(until=target_time)
+                await self._broadcast()
+
+                if time.monotonic() - last_reap > REAP_INTERVAL_S:
+                    self.airport.reap_terminal_flights(TERMINAL_MAX_AGE_S)
+                    last_reap = time.monotonic()
+            except Exception:  # noqa: BLE001
+                # The simulation loop must never die: an uncaught exception here
+                # (e.g. a transient network error mid-broadcast) would otherwise
+                # silently kill the *entire* twin for every connected client
+                # with no crash-visible symptom besides a frozen UI. Log it and
+                # keep ticking instead.
+                logger.exception("Simulation loop tick failed; continuing")
+
             await asyncio.sleep(period)
 
     async def _broadcast(self):
         if not self.clients:
             return
-        active_flights = [f for f in self.airport.flights.values() if f["status"] != "airborne"]
+        inactive_states = {"airborne", "parked"}
+        active_flights = [f for f in self.airport.flights.values() if f["status"] not in inactive_states]
         payload = {
             "flights": active_flights,
             "time": round(self.env.now, 1),
@@ -86,7 +122,13 @@ class SimulationHub:
             "twin": self.airport.status_snapshot(),
         }
         dead = set()
-        for ws in self.clients:
+        # Snapshot with list(...) - self.clients can be mutated concurrently by
+        # a new /ws/twin connection while we're awaiting ws.send_json() below,
+        # and iterating the live set directly raises "Set changed size during
+        # iteration" the moment that happens, which used to crash this whole
+        # loop permanently (see _simulation_loop's try/except above for the
+        # blast-radius fix; this is the actual root cause fix).
+        for ws in list(self.clients):
             try:
                 await ws.send_json(payload)
             except Exception:  # noqa: BLE001 - client disconnected mid-broadcast

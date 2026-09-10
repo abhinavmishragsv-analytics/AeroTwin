@@ -1,9 +1,9 @@
-import React, { useEffect, useState, useRef, useCallback } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import Map from 'react-map-gl/maplibre';
 import * as maplibregl from 'maplibre-gl';
 import { DeckGL } from '@deck.gl/react';
 import { ScenegraphLayer } from '@deck.gl/mesh-layers';
-import { PathLayer, ScatterplotLayer } from '@deck.gl/layers';
+import { PathLayer, ScatterplotLayer, PolygonLayer } from '@deck.gl/layers';
 import 'maplibre-gl/dist/maplibre-gl.css';
 
 // MapTiler API Key from environment
@@ -13,15 +13,20 @@ const MAPTILER_KEY = import.meta.env.VITE_MAPTILER_KEY || 'SZbWa44ht6gE8vB8WqhV'
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000';
 const WS_URL = API_BASE.replace(/^http/, 'ws') + '/ws/twin';
 
-// Exact Vadodara Airport (VABO) Initial Overview
+// Exact Vadodara Airport (VABO) Initial Overview - also the locked orbit pivot
+// (see ORBIT_PIVOT below): the camera orbits and zooms around this point and
+// is never allowed to pan away from it.
 const INITIAL_VIEW_STATE = {
   longitude: 73.2260,
   latitude: 22.3350,
   zoom: 15.5,
   pitch: 65,
   bearing: 44,
+  minZoom: 13.5,
+  maxZoom: 19,
   maxPitch: 85
 };
+const ORBIT_PIVOT = { longitude: INITIAL_VIEW_STATE.longitude, latitude: INITIAL_VIEW_STATE.latitude };
 
 // Vadodara Runway 04/22 & Taxiway Alpha Geographic Paths
 const AIRPORT_GEOMETRY = [
@@ -59,18 +64,69 @@ const DISRUPTION_ACTIONS = [
   { type: 'clear', duration_minutes: 0, label: 'Clear All', icon: '✅' }
 ];
 
+// Build a rectangular building footprint as a rotated GeoJSON-style polygon
+// ([lng, lat] winding order, matching deck.gl's PolygonLayer convention).
+// center is [lat, lng]; widthM/depthM are the footprint's plan dimensions in
+// meters; rotationDeg rotates the rectangle clockwise from north, so a
+// building can be aligned with the runway/taxiway instead of sitting as a
+// plain north-south box.
+function rectFootprint([lat, lng], widthM, depthM, rotationDeg = 0) {
+  const rad = (rotationDeg * Math.PI) / 180;
+  const halfW = widthM / 2;
+  const halfD = depthM / 2;
+  const metersPerDegLat = 111320;
+  const metersPerDegLng = 111320 * Math.cos((lat * Math.PI) / 180);
+
+  return [
+    [-halfW, -halfD],
+    [halfW, -halfD],
+    [halfW, halfD],
+    [-halfW, halfD]
+  ].map(([e, n]) => {
+    const re = e * Math.cos(rad) + n * Math.sin(rad);
+    const rn = -e * Math.sin(rad) + n * Math.cos(rad);
+    return [lng + re / metersPerDegLng, lat + rn / metersPerDegLat];
+  });
+}
+
+// Illustrative 3D massing for VABO's terminal apron - real extruded geometry
+// (not a flat texture), aligned with the runway/taxiway orientation. Footprint
+// sizes and offsets are approximate, not surveyed, since the point is to give
+// the twin real volumetric structures to orbit around.
+const AIRPORT_BUILDINGS = [
+  {
+    id: 'terminal',
+    name: 'Terminal Building',
+    footprint: rectFootprint([22.33495, 73.22715], 65, 24, 44),
+    height: 13,
+    fillColor: [148, 163, 184, 235],
+    lineColor: [226, 232, 240, 255]
+  },
+  {
+    id: 'atc-tower',
+    name: 'ATC Tower',
+    footprint: rectFootprint([22.3363, 73.2251], 13, 13, 0),
+    height: 32,
+    fillColor: [100, 116, 139, 235],
+    lineColor: [56, 189, 248, 255]
+  },
+  {
+    id: 'hangar',
+    name: 'Maintenance Hangar',
+    footprint: rectFootprint([22.33390, 73.22820], 50, 38, 44),
+    height: 11,
+    fillColor: [120, 113, 108, 230],
+    lineColor: [214, 211, 209, 255]
+  }
+];
+
 export default function App() {
   const [twinState, setTwinState] = useState({ flights: [], time: 0 });
   const [connectionStatus, setConnectionStatus] = useState('CONNECTING');
   const [viewState, setViewState] = useState(INITIAL_VIEW_STATE);
   const [cameraMode, setCameraMode] = useState('orbit'); // 'orbit' | 'chase' | 'tower' | 'threshold'
-  const [customModelUrl, setCustomModelUrl] = useState(null);
-  const [customModelName, setCustomModelName] = useState(null);
-  const [isDragOver, setIsDragOver] = useState(false);
   const [disruptionBusy, setDisruptionBusy] = useState(null);   // type currently in-flight, or null
   const [disruptionError, setDisruptionError] = useState(null);
-
-  const fileInputRef = useRef(null);
 
   // Bi-directional control: POST a disruption to the FastAPI twin. The SimPy
   // simulation mutates immediately server-side and the next WebSocket frame
@@ -95,34 +151,56 @@ export default function App() {
     }
   }, []);
 
-  // WebSocket Live Simulation Stream
+  // WebSocket Live Simulation Stream.
+  //
+  // Guarded with a `cancelled` flag against React 18 StrictMode's dev-only
+  // double-invocation of effects (mount -> cleanup -> mount again): without
+  // it, the first socket's onclose handler can fire after the second effect
+  // run has already started a new connection, causing a spurious
+  // "WebSocket is closed before the connection is established" console
+  // warning and a redundant reconnect timer. This is a dev-mode-only
+  // artifact - it does not happen in a production build - but guarding it
+  // properly is also just correct effect hygiene either way.
   useEffect(() => {
     let ws;
     let timer;
+    let cancelled = false;
 
     const connect = () => {
+      if (cancelled) return;
       ws = new WebSocket(WS_URL);
-      ws.onopen = () => setConnectionStatus('ONLINE');
+
+      ws.onopen = () => {
+        if (!cancelled) setConnectionStatus('ONLINE');
+      };
       ws.onmessage = (e) => {
+        if (cancelled) return;
         try {
-          const parsed = JSON.parse(e.data);
-          setTwinState(parsed);
+          setTwinState(JSON.parse(e.data));
         } catch (err) {
           console.error('Error parsing telemetry:', err);
         }
       };
       ws.onclose = () => {
+        if (cancelled) return;
         setConnectionStatus('RECONNECTING...');
         timer = setTimeout(connect, 2000);
       };
-      ws.onerror = () => ws.close();
+      ws.onerror = () => {
+        if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+          ws.close();
+        }
+      };
     };
 
     connect();
 
     return () => {
+      cancelled = true;
       if (timer) clearTimeout(timer);
-      if (ws) ws.close();
+      if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+        ws.close();
+      }
     };
   }, []);
 
@@ -131,6 +209,14 @@ export default function App() {
 
   // Dynamic Camera Modes
   useEffect(() => {
+    if (cameraMode === 'orbit') {
+      // Re-center on the runway pivot immediately when (re-)entering orbit
+      // mode, rather than leaving the camera wherever chase/tower/threshold
+      // last left it.
+      setViewState({ ...INITIAL_VIEW_STATE, transitionDuration: 400 });
+      return;
+    }
+
     if (!primaryFlight) return;
 
     if (cameraMode === 'chase') {
@@ -168,26 +254,6 @@ export default function App() {
       }));
     }
   }, [cameraMode, primaryFlight]);
-
-  // Handle Custom GLB File Upload
-  const handleFileUpload = useCallback((file) => {
-    if (!file) return;
-    if (file.name.endsWith('.glb') || file.name.endsWith('.gltf')) {
-      const url = URL.createObjectURL(file);
-      setCustomModelUrl(url);
-      setCustomModelName(file.name);
-    } else {
-      alert('Please upload a 3D model with .glb or .gltf format.');
-    }
-  }, []);
-
-  const handleDrop = (e) => {
-    e.preventDefault();
-    setIsDragOver(false);
-    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-      handleFileUpload(e.dataTransfer.files[0]);
-    }
-  };
 
   // MapTiler 3D Satellite Map Style with 3D Terrain Elevation
   const mapStyle = {
@@ -230,7 +296,7 @@ export default function App() {
     }
   };
 
-  // Deck.GL Layers: 3D Aircraft Scenegraph + Trajectory Paths + Waypoint Markers
+  // Deck.GL Layers: 3D Buildings + Aircraft Scenegraph + Trajectory Paths
   const layers = [
     // Airfield Runway & Taxiway Centerline Guidelines
     new PathLayer({
@@ -241,6 +307,29 @@ export default function App() {
       getWidth: (d) => d.width,
       widthUnits: 'meters',
       billboard: false,
+      pickable: false
+    }),
+
+    // Real extruded 3D building massing (terminal, ATC tower, hangar) - this is
+    // what makes the twin a true volumetric 3D model rather than a flat
+    // satellite photo with markers floating over it.
+    new PolygonLayer({
+      id: 'airport-buildings',
+      data: AIRPORT_BUILDINGS,
+      getPolygon: (d) => d.footprint,
+      extruded: true,
+      wireframe: true,
+      getElevation: (d) => d.height,
+      getFillColor: (d) => d.fillColor,
+      getLineColor: (d) => d.lineColor,
+      getLineWidth: 1,
+      lineWidthUnits: 'meters',
+      material: {
+        ambient: 0.4,
+        diffuse: 0.6,
+        shininess: 32,
+        specularColor: [60, 64, 70]
+      },
       pickable: false
     }),
 
@@ -257,18 +346,21 @@ export default function App() {
       getLineWidth: 2
     }),
 
-    // 3D Airplane Model (Real GLB with PBR Materials & Dynamic Altitude Climb)
+    // 3D Airplane Model (Real GLB with PBR Materials & Dynamic Altitude Climb).
+    // Position/orientation transitions are tuned to match the backend's
+    // broadcast rate (core/config.py STREAM_HZ) so the client is never
+    // interpolating across a gap wider than one real update.
     new ScenegraphLayer({
       id: 'aircraft-3d-model',
       data: twinState.flights,
-      scenegraph: customModelUrl || '/aircraft.glb',
+      scenegraph: '/aircraft.glb',
       getPosition: (d) => [d.lng, d.lat, d.altitude || 0],
       getOrientation: (d) => [d.pitch || 0, -d.heading + 90, d.roll || 0],
       sizeScale: 28,
       _lighting: 'pbr',
       transitions: {
-        getPosition: 120,
-        getOrientation: 120
+        getPosition: 90,
+        getOrientation: 90
       }
     })
   ];
@@ -283,57 +375,7 @@ export default function App() {
         overflow: 'hidden',
         userSelect: 'none'
       }}
-      onDragOver={(e) => {
-        e.preventDefault();
-        setIsDragOver(true);
-      }}
-      onDragLeave={() => setIsDragOver(false)}
-      onDrop={handleDrop}
     >
-      {/* Hidden File Input for GLB Upload */}
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept=".glb,.gltf"
-        style={{ display: 'none' }}
-        onChange={(e) => {
-          if (e.target.files && e.target.files[0]) {
-            handleFileUpload(e.target.files[0]);
-          }
-        }}
-      />
-
-      {/* Drag & Drop Visual Indicator Overlay */}
-      {isDragOver && (
-        <div
-          style={{
-            position: 'absolute',
-            inset: 0,
-            zIndex: 50,
-            background: 'rgba(2, 132, 199, 0.6)',
-            border: '4px dashed #38bdf8',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            pointerEvents: 'none'
-          }}
-        >
-          <div
-            style={{
-              background: '#0f172a',
-              padding: '28px 48px',
-              borderRadius: '16px',
-              color: '#38bdf8',
-              fontFamily: 'monospace',
-              fontSize: '1.3rem',
-              boxShadow: '0 20px 40px rgba(0,0,0,0.6)'
-            }}
-          >
-            Drop your .GLB Aircraft model to spawn it!
-          </div>
-        </div>
-      )}
-
       {/* TOP-LEFT: Airport Telemetry HUD */}
       <div
         style={{
@@ -480,87 +522,6 @@ export default function App() {
         </div>
       </div>
 
-      {/* TOP-RIGHT: 3D Aircraft Model Uploader */}
-      <div
-        style={{
-          position: 'absolute',
-          top: 20,
-          right: 20,
-          zIndex: 10,
-          background: 'rgba(15, 23, 42, 0.9)',
-          backdropFilter: 'blur(12px)',
-          border: '1px solid rgba(56, 189, 248, 0.35)',
-          borderRadius: '14px',
-          padding: '16px 20px',
-          color: '#f8fafc',
-          boxShadow: '0 12px 36px rgba(0, 0, 0, 0.7)',
-          width: '280px'
-        }}
-      >
-        <div style={{ fontSize: '0.85rem', fontWeight: 700, color: '#38bdf8', marginBottom: '8px' }}>
-          3D AIRCRAFT MODEL
-        </div>
-
-        {customModelName ? (
-          <div style={{ marginBottom: '12px' }}>
-            <div style={{ fontSize: '0.8rem', color: '#4ade80', display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <span>✓ Custom Active:</span>
-              <strong style={{ color: '#f8fafc', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {customModelName}
-              </strong>
-            </div>
-            <button
-              onClick={() => {
-                setCustomModelUrl(null);
-                setCustomModelName(null);
-              }}
-              style={{
-                marginTop: '6px',
-                background: 'transparent',
-                border: '1px solid rgba(239, 68, 68, 0.5)',
-                color: '#f87171',
-                borderRadius: '6px',
-                padding: '4px 10px',
-                fontSize: '0.75rem',
-                cursor: 'pointer'
-              }}
-            >
-              Reset to Default Twin Jet
-            </button>
-          </div>
-        ) : (
-          <div style={{ fontSize: '0.75rem', color: '#94a3b8', marginBottom: '12px', lineHeight: '1.4' }}>
-            Currently rendering default 3D jet. You can upload your own <strong>.glb</strong> or <strong>.gltf</strong> model.
-          </div>
-        )}
-
-        <button
-          onClick={() => fileInputRef.current && fileInputRef.current.click()}
-          style={{
-            width: '100%',
-            background: 'linear-gradient(135deg, #0284c7 0%, #0369a1 100%)',
-            border: 'none',
-            color: '#ffffff',
-            borderRadius: '8px',
-            padding: '10px 14px',
-            fontWeight: 600,
-            fontSize: '0.85rem',
-            cursor: 'pointer',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            gap: '8px',
-            boxShadow: '0 4px 12px rgba(2, 132, 199, 0.4)'
-          }}
-        >
-          <span>📁</span>
-          <span>{customModelName ? 'Swap .GLB Model' : 'Upload Airplane (.glb)'}</span>
-        </button>
-        <div style={{ fontSize: '0.7rem', color: '#64748b', textAlign: 'center', marginTop: '6px' }}>
-          or drag & drop file anywhere on screen
-        </div>
-      </div>
-
       {/* BOTTOM-RIGHT: ATC Disruption Console - the "write" side of the bi-directional twin */}
       <div
         style={{
@@ -677,12 +638,27 @@ export default function App() {
       {/* MapLibre + Deck.GL 3D Geospatial Airfield */}
       <DeckGL
         viewState={viewState}
-        onViewStateChange={(e) => {
+        onViewStateChange={({ viewState: next }) => {
           if (cameraMode === 'orbit') {
-            setViewState(e.viewState);
+            // Lock the pivot: carry through zoom/pitch/bearing from user
+            // interaction, but always snap longitude/latitude back to the
+            // runway pivot so panning is impossible - only orbit + zoom remain.
+            setViewState({ ...next, longitude: ORBIT_PIVOT.longitude, latitude: ORBIT_PIVOT.latitude });
           }
         }}
-        controller={cameraMode === 'orbit'}
+        controller={
+          cameraMode === 'orbit'
+            ? {
+                dragPan: false,
+                dragRotate: true,
+                scrollZoom: true,
+                doubleClickZoom: false,
+                touchZoom: true,
+                touchRotate: true,
+                keyboard: false
+              }
+            : false
+        }
         layers={layers}
       >
         <Map mapLib={maplibregl} mapStyle={mapStyle} />

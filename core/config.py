@@ -41,7 +41,7 @@ RUNWAY_LENGTH_M = 2469
 # Simulation tuning
 # ---------------------------------------------------------------------------
 BASE_FLIGHT_SPAWN_INTERVAL_S = 12.0     # seconds between new departures (sim time)
-STREAM_HZ = 12.0                        # websocket push rate to the 3D frontend
+STREAM_HZ = 15.0                        # websocket push rate to the 3D frontend
 DISRUPTION_MAX_MINUTES = 120            # sanity clamp for user-injected disruptions
 
 AIRLINE_CODES = ["6E", "AI", "SG", "QP"]
