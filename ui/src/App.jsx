@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import Map from 'react-map-gl/maplibre';
 import * as maplibregl from 'maplibre-gl';
 import { DeckGL } from '@deck.gl/react';
@@ -208,16 +208,26 @@ export default function App() {
   const twin = twinState.twin || null;
 
   // Dynamic Camera Modes
+  //
+  // Split into two effects deliberately. Re-centering on orbit mode must only
+  // run once per mode switch - it has no business depending on primaryFlight
+  // at all, but it used to live in the same effect as the chase/tower/
+  // threshold logic below, which DOES need to depend on primaryFlight (it
+  // updates ~15x/sec from the WebSocket). With both branches sharing one
+  // dependency array, entering orbit mode fired setViewState on every single
+  // websocket tick, each with a fresh 400ms transition that never got a
+  // chance to finish before the next tick restarted it - deck.gl's transition
+  // manager and this component's onViewStateChange handler ended up
+  // fighting each other's updates, which is what produced React's
+  // "Maximum update depth exceeded" warning.
   useEffect(() => {
     if (cameraMode === 'orbit') {
-      // Re-center on the runway pivot immediately when (re-)entering orbit
-      // mode, rather than leaving the camera wherever chase/tower/threshold
-      // last left it.
       setViewState({ ...INITIAL_VIEW_STATE, transitionDuration: 400 });
-      return;
     }
+  }, [cameraMode]);
 
-    if (!primaryFlight) return;
+  useEffect(() => {
+    if (cameraMode === 'orbit' || !primaryFlight) return;
 
     if (cameraMode === 'chase') {
       // Smoothly follow behind the aircraft as it taxis and climbs
@@ -297,7 +307,13 @@ export default function App() {
   };
 
   // Deck.GL Layers: 3D Buildings + Aircraft Scenegraph + Trajectory Paths
-  const layers = [
+  //
+  // Memoized on twinState.flights specifically (not the whole twinState
+  // object, which also changes on every websocket tick for unrelated reasons
+  // like the disruption log) so that unrelated re-renders - e.g. clicking a
+  // disruption button, which only touches disruptionBusy/disruptionError -
+  // don't force deck.gl to rebuild and re-diff every layer from scratch.
+  const layers = useMemo(() => [
     // Airfield Runway & Taxiway Centerline Guidelines
     new PathLayer({
       id: 'airport-guidelines',
@@ -318,7 +334,7 @@ export default function App() {
       data: AIRPORT_BUILDINGS,
       getPolygon: (d) => d.footprint,
       extruded: true,
-      wireframe: true,
+      wireframe: false,
       getElevation: (d) => d.height,
       getFillColor: (d) => d.fillColor,
       getLineColor: (d) => d.lineColor,
@@ -363,7 +379,7 @@ export default function App() {
         getOrientation: 90
       }
     })
-  ];
+  ], [twinState.flights]);
 
   return (
     <div

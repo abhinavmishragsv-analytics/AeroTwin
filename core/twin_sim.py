@@ -54,6 +54,14 @@ CLIMB_APPROACH_ALT_M = 420.0
 # Takeoff-roll / landing-rollout midpoint (end of the accelerate/decelerate run)
 RUNWAY_ROLL_POINT = (22.34120, 73.23150)
 
+# Short-final holding fix for arrivals: an aircraft must acquire the runway
+# Resource BEFORE descending below this point/altitude. This is what
+# guarantees no arrival can ever visually reach the ground while a departure
+# is occupying the runway - if the runway is busy, the aircraft holds here,
+# still airborne, instead of continuing its descent to the threshold.
+SHORT_FINAL_FIX = (22.34778, 73.23838)
+SHORT_FINAL_ALT_M = 52.0
+
 
 def _bearing_deg(p1, p2):
     """Great-circle initial bearing from p1=(lat,lng) to p2=(lat,lng), in degrees [0, 360)."""
@@ -345,7 +353,9 @@ class VadodaraAirport:
 
         approach_heading = _bearing_deg(CLIMB_APPROACH_FIX, RUNWAY_22_THRESHOLD)
 
-        # 1. On final approach, descending toward Runway 22 threshold
+        # 1. On final approach, descending toward the short-final holding fix.
+        # Note this does NOT yet reach the ground or the runway threshold -
+        # see the runway.request() gate below for why.
         self.flights[flight_id] = {
             "id": flight_id,
             "lat": CLIMB_APPROACH_FIX[0],
@@ -360,25 +370,46 @@ class VadodaraAirport:
             "direction": "ARR",
         }
         yield from self._advance(
-            flight_id, CLIMB_APPROACH_FIX, RUNWAY_22_THRESHOLD, steps=_steps_for(6.6), step_dt=STEP_DT,
+            flight_id, CLIMB_APPROACH_FIX, SHORT_FINAL_FIX, steps=_steps_for(5.4), step_dt=STEP_DT,
             target_heading=approach_heading,
-            speed_fn=lambda t: int(160 - 20 * t),
-            altitude_fn=lambda t: round(CLIMB_APPROACH_ALT_M * ((1 - t) ** 1.3), 1),
-            pitch_fn=lambda t: -3.0 if t < 0.85 else -1.0,
+            speed_fn=lambda t: int(160 - 15 * t),
+            altitude_fn=lambda t: round(
+                CLIMB_APPROACH_ALT_M + (SHORT_FINAL_ALT_M - CLIMB_APPROACH_ALT_M) * (t ** 0.8), 1
+            ),
+            pitch_fn=lambda t: -3.0,
         )
-        self.flights[flight_id]["altitude"] = 0.0
-        self.flights[flight_id]["pitch"] = 0.0
 
-        # 2. A runway closure/ground stop on short final would be a go-around in
-        # real ATC; here we simply hold position at the threshold until clear,
-        # which is visually equivalent for a slow-taxi-speed twin.
+        # 2. MUTUAL EXCLUSION GATE: an aircraft may not continue its descent
+        # below SHORT_FINAL_ALT_M / cross the threshold until it holds the
+        # runway Resource - the same Resource pushback_and_depart() holds for
+        # its entire lineup -> takeoff-roll -> climb sequence. This is what
+        # actually guarantees "no plane lands while one is taking off": if
+        # the runway is occupied, this aircraft holds here, still airborne at
+        # SHORT_FINAL_ALT_M, instead of continuing down to the ground - a
+        # real go-around/holding pattern would extend further, but for this
+        # twin holding in place is the visually-equivalent and functionally
+        # correct behavior (nobody reaches the ground while occupied, which
+        # is the actual safety property being modeled).
         with self.runway.request() as req:
             yield req
             while self.env.now < self.runway_closed_until or self.ground_stop:
                 self.flights[flight_id]["status"] = "holding"
                 yield self.env.timeout(2.0)
 
-            # 3. Touchdown & landing rollout, decelerating along the runway centerline
+            # 3. Final descent from the short-final fix to touchdown - only
+            # reachable once the runway is confirmed exclusively ours.
+            self.flights[flight_id]["status"] = "approach"
+            yield from self._advance(
+                flight_id, SHORT_FINAL_FIX, RUNWAY_22_THRESHOLD, steps=_steps_for(1.3), step_dt=STEP_DT,
+                target_heading=approach_heading,
+                speed_fn=lambda t: int(145 - 5 * t),
+                altitude_fn=lambda t: round(SHORT_FINAL_ALT_M * ((1 - t) ** 1.5), 1),
+                pitch_fn=lambda t: -3.0 if t < 0.8 else -1.0,
+            )
+            self.flights[flight_id]["altitude"] = 0.0
+            self.flights[flight_id]["pitch"] = 0.0
+
+            # 4. Touchdown & landing rollout, decelerating along the runway centerline
             self.flights[flight_id]["status"] = "landing_rollout"
             yield from self._advance(
                 flight_id, RUNWAY_22_THRESHOLD, RUNWAY_ROLL_POINT, steps=_steps_for(4.9), step_dt=STEP_DT,
