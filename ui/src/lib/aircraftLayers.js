@@ -32,10 +32,16 @@ const STATUS_COLOR = {
 
 // A minimal plane glyph as an inline SVG data URI - no external asset fetch,
 // no GLB parse cost, and it scales trivially with model_scale.
+//
+// width/height are required here, not just viewBox: deck.gl's IconLayer loads
+// this through createImageBitmap(), and a browser refuses to rasterize an SVG
+// that has no explicit natural dimensions - viewBox alone doesn't count. Without
+// them this throws ("SVG image without natural dimensions") and no aircraft
+// render at all.
 const PLANE_ICON =
   "data:image/svg+xml;base64," +
   btoa(
-    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+    `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
       <path d="M32 2 L38 24 L60 34 L60 40 L38 34 L38 46 L48 54 L48 59 L32 55 L16 59 L16 54 L26 46 L26 34 L4 40 L4 34 L26 24 Z"
             fill="white"/>
     </svg>`

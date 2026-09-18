@@ -30,13 +30,33 @@ const SATELLITE_STYLE = {
     satellite: {
       type: "raster",
       tiles: [
-        "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        // The canonical host, not the older "server." one - that redirects
+        // here, and a redirect can drop CORS headers in some fetch paths.
+        "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
       ],
       tileSize: 256,
       attribution: "Esri World Imagery",
     },
   },
   layers: [{ id: "satellite", type: "raster", source: "satellite" }],
+};
+
+// deck.gl's MapController asserts that viewState.longitude/latitude are
+// finite numbers the moment it mounts - before React even gets to run our
+// effects, let alone before the WebSocket delivers the real airport layout.
+// Passing `undefined` (or null) as the initial viewState throws inside
+// MapState's constructor and takes the whole render tree down with it, which
+// is the black screen: there is no fallback UI for a deck.gl crash. Seeding a
+// real, finite default here means the very first frame is a valid (if
+// unremarkable) view of India, and it gets replaced by the airport's own
+// view state the instant the layout frame arrives - see the WebSocket
+// `onmessage` handler below.
+const FALLBACK_VIEW_STATE = {
+  longitude: 78.9629,
+  latitude: 22.5937,
+  zoom: 3.6,
+  pitch: 0,
+  bearing: 0,
 };
 
 export default function App() {
@@ -46,7 +66,7 @@ export default function App() {
   const [frame, setFrame] = useState(null);
   const [connected, setConnected] = useState(false);
   const [camera, setCamera] = useState("orbit");
-  const [viewState, setViewState] = useState(null);
+  const [viewState, setViewState] = useState(FALLBACK_VIEW_STATE);
   const wsRef = useRef(null);
 
   useEffect(() => {
@@ -72,7 +92,11 @@ export default function App() {
       const msg = JSON.parse(evt.data);
       if (msg.kind === "layout") {
         setLayout(msg.layout);
-        setViewState((prev) => prev || { ...airportViewState(msg.layout), transitionDuration: 0 });
+        // Fly from the fallback (or the previous airport, if switching) to
+        // this one. Unconditional, not "only if we don't have a view yet" -
+        // the old `prev || …` guard relied on the initial state being null,
+        // which stopped being true once a real fallback replaced it.
+        setViewState({ ...airportViewState(msg.layout), transitionDuration: 1200 });
       } else {
         setFrame(msg);
       }
@@ -130,7 +154,7 @@ export default function App() {
   return (
     <div className="app-root">
       <DeckGL
-        viewState={viewState || undefined}
+        viewState={viewState}
         onViewStateChange={({ viewState: vs }) => setViewState(vs)}
         controller={true}
         layers={layers}
