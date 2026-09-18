@@ -1,131 +1,139 @@
+# AeroTwin
+
+A bi-directional 3D digital twin of Indian airport ground and terminal-area
+operations, built around a real, surveyed model of **Vadodara Airport (VABO)**
+and a generic airport builder that extends the same simulation to Delhi,
+Mumbai, Ahmedabad, Pune and Surat.
+
+"Bi-directional" means the browser is not just a viewer: posting a disruption
+(`POST /api/airports/{icao}/disrupt`) mutates the live SimPy simulation, and
+every connected client sees the consequence within a frame - aircraft holding
+short, arrivals going around, ground traffic re-routing around a closed
+taxiway.
+
+## What's here
+
+- **A real ATC layer**, not a timer. Every taxiway segment and every taxiway
+  junction is a single-occupancy resource; a taxi clearance acquires them all
+  in one canonical order, which makes ground deadlock structurally impossible
+  and two-aircraft-in-the-same-place structurally impossible. The runway is a
+  priority resource with wake-turbulence separation, crosswind/tailwind
+  limits, and CAT I/none low-visibility minima. See `core/atc.py`.
+- **A procedurally generated airfield.** `core/airports/geometry.py` turns a
+  short structural description (runway thresholds, a taxi graph, stand
+  positions) into every piece of drawable geometry - pavement, piano keys,
+  touchdown-zone bars, ICAO hold-position markings, edge lights, stand stop
+  bars, extruded buildings - in WGS84, server-side. The frontend draws exactly
+  this and nothing else, so the picture can never drift from what the
+  simulation believes the airport looks like.
+- **A real taxi router.** `core/routing.py` runs Dijkstra over the taxi graph,
+  preferring taxiways to taxilanes and rapid exits to right-angle turn-offs -
+  the shape of clearance a real ground controller would give.
+- **A real fleet.** `core/aircraft.py` carries published performance for eight
+  aircraft types (A320neo, A321neo, 737-800, 737 MAX 8, ATR 72-600, Dash 8
+  Q400, 787-9, 777-300ER): takeoff/landing distance, rotation speed, climb
+  rate, wake category. An intersection departure is only offered when the
+  runway remaining is actually enough for that aircraft.
+- **Multi-airport from one engine.** Each airport gets its own SimPy
+  environment and its own WebSocket audience
+  (`ws://.../ws/twin/{icao-or-slug}`), created lazily on first connection.
+  `/vadodara`, `/delhi`, `/mumbai`, `/ahmedabad`, `/pune`, `/surat` are all the
+  same code running different data.
+- **ML model integration.** `core/models.py` loads whatever `.pkl` artifacts
+  exist in `core/models/` (macro delay forecast, taxi-time regression,
+  congestion-tier clustering, network criticality, weather ground-stop
+  probability) and the simulation calls them for taxi-time prediction and risk
+  scoring; the notebooks that train them are in `notebooks/`. With no `.pkl`
+  present the registry falls back to a documented heuristic, so the twin runs
+  standalone.
+
+## Why it doesn't collide
+
+Ground and runway conflicts are prevented by construction, not by tuning:
+every piece of pavement an aircraft could occupy is a capacity-1 resource, and
+a route is only granted once every resource along it is acquired. That claim
+is checked, not just asserted - `scripts/soak_test.py` runs each airport
+headless, far faster than real time, under both nominal traffic and a
+deliberately hostile disruption sequence (runway closure, fog, taxiway
+closure, high wind, an emergency arrival, a thunderstorm), and audits actual
+inter-aircraft distances every frame:
+
+```bash
+python scripts/soak_test.py            # all six airports, 60 sim-minutes each
+python scripts/soak_test.py VABO 180   # one airport, 3 sim-hours
 ```
-   AEROTWIN
-```
 
-> A true, bi-directional 3D digital twin of Vadodara Airport (VABO)
-> status: RUNNABLE END-TO-END | domain: ITS x Aviation x Digital Twin
-
----
-
-## About
-
-AeroTwin is a closed-loop digital twin of ground operations at Vadodara
-Airport (VABO) - not a flight tracker, not a 3D dashboard skinned over
-static data. The "twin" is a live SimPy discrete-event simulation running
-inside a FastAPI server: every aircraft moves through real gate -> pushback
--> taxi -> hold -> runway -> climb-out states, at exact WGS84 coordinates
-for VABO's Runway 04/22 and Taxiway Alpha. The 3D frontend (React + Deck.GL
-+ MapLibre satellite imagery) is strictly a visualization layer over that
-live state.
-
-It is **bi-directional**: inject a runway closure, a ground stop, fog, or a
-crosswind event from the UI's ATC console, and the FastAPI layer mutates the
-one running simulation - every in-progress aircraft reacts on its next
-simulation step (holds short, queues, or climbs out late), and every
-connected browser sees it within one WebSocket frame.
-
-Five machine-learning modules - trained in Google Colab on public,
-no-login-required datasets - feed real-time risk into that simulation:
-delay forecasting, taxi-time prediction, congestion tiering, network
-criticality, and weather ground-stop probability. None of them are required
-to run the twin: `core/models.py` falls back to statistically-reasonable
-synthetic predictions for any module you haven't trained yet, so the
-simulation is fully playable from a fresh clone.
-
----
+A `PASS` means zero ground separation violations (55 m standard), zero
+airborne separation violations (300 m / 120 ft standard), and zero runway
+incursions, for the whole run. Run this after any change to `core/atc.py`,
+`core/routing.py`, or an airport layout.
 
 ## Architecture
 
 ```
-core/            FastAPI WebSocket server + SimPy simulation + ML inference
-  main.py          - single persistent simulation, REST + WebSocket API
-  twin_sim.py       - the SimPy engine: gate/pushback/taxi/hold/runway/climb
-  models.py         - ML model registry (loads .pkl, falls back to synthetic)
-  config.py         - VABO geometry + simulation constants, single source of truth
-  models/           - drop trained .pkl artifacts here (gitignored)
-
-ui/              Vite + React 19 + Deck.GL + MapLibre GL JS frontend
-  src/App.jsx       - 3D scene, telemetry HUD, ATC disruption console
-
-notebooks/       Google Colab training notebooks (generate via scripts/build_notebooks.py)
+core/
+  geo.py              spherical + local-flat geodesy shared by everything
+  airports/
+    schema.py          the structural description: runways, taxi graph, stands, buildings
+    geometry.py         schema -> drawable visuals (pavement, paint, lights, signs)
+    vabo.py              the surveyed VABO layout
+    generic.py            builds a structurally identical airport from thresholds + apron params
+    __init__.py             registry: ICAO / IATA / slug / city -> layout
+  aircraft.py         fleet performance data, wake separation tables
+  routing.py          Dijkstra taxi-route planning
+  atc.py              GroundNetwork (locking), RunwayController, StandManager, SeparationMonitor
+  twin_sim.py         the SimPy flight lifecycle: arrival, hold, go-around, divert,
+                       taxi-in, turnaround, pushback, taxi-out, departure
+  main.py             FastAPI: REST + WebSocket, one AirportTwin per ICAO
+  models.py           ML model registry (unchanged - loads core/models/*.pkl)
 scripts/
-  build_notebooks.py    - regenerates all notebooks/*.ipynb from scratch
-  make_aircraft_glb.py  - procedurally generates a placeholder aircraft.glb
+  soak_test.py        headless safety audit (see above)
+ui/
+  src/lib/api.js               API base + URL-slug resolution
+  src/lib/airfieldLayers.js    layout.visuals -> Deck.GL layers
+  src/lib/aircraftLayers.js    live flight frames -> Deck.GL layers
+  src/components/              HUD, flight strips, ATC console, camera bar, weather, airport switcher
+  src/App.jsx                  ties it together: WebSocket in, Deck.GL + MapLibre out
 ```
 
-| module | function | technique | notebook |
-|---|---|---|---|
-| 01_forecast | macro delay-risk forecasting | Prophet (+ seasonal-naive fallback) | 01_forecast_macro.ipynb |
-| 02_taxitime | taxi/ground-delay duration prediction | XGBoost | 02_taxitime_xgboost.ipynb |
-| 03_cluster | congestion-risk tiering (LOW/MODERATE/HIGH) | K-Means | 03_cluster_kmeans.ipynb |
-| 04_graph | route-network structural criticality | NetworkX (betweenness/PageRank) | 04_graph_networkx.ipynb |
-| 05_twin | live simulation + disruption injection | SimPy (lives in core/twin_sim.py) | 05_twin_simpy.ipynb (eval harness only) |
-| 07_weather | Cat III ground-stop probability | RandomForest | 07_weather_disruption.ipynb |
+## Running it
 
-(Module 06 - predictive maintenance - is out of scope for this build.)
-
----
-
-## Stack
-
-```
-core:  python 3.11+ | fastapi | uvicorn | simpy | pydantic | websockets
-ml:    prophet | xgboost | scikit-learn | networkx | joblib | pandas
-ui:    react 19 | vite | deck.gl | maplibre-gl | react-map-gl
-```
-
----
-
-## Data sources (all public, no login required)
-
-| dataset | source | used by |
-|---|---|---|
-| BTS Airline Delay Cause (mirror) | github.com/YBI-Foundation/Dataset | Modules 01, 02 |
-| OpenFlights airports/routes | github.com/jpatokal/openflights | Modules 03, 04 |
-| IEM ASOS/METAR archive (IN__ASOS network) | mesonet.agron.iastate.edu | Module 07 |
-
-Every notebook attempts the real, live download first and falls back to a
-structurally-identical synthetic dataset if the source is ever unreachable
-(rate-limited, moved, offline grading environment) - so every notebook
-completes and produces a usable `.pkl` regardless of network conditions.
-
----
-
-## Run
-
-See the step-by-step guide provided alongside this repo for the full local +
-Colab workflow. Short version:
+Backend:
 
 ```bash
-# 1. Backend
-python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
-uvicorn core.main:app --reload --port 8000
+uvicorn core.main:app --reload
+```
 
-# 2. Frontend (separate terminal)
+Frontend:
+
+```bash
 cd ui
 npm install
 npm run dev
 ```
 
-Then open the printed Vite URL (typically http://localhost:5173). The twin
-runs immediately with synthetic ML fallbacks - train the notebooks in
-`notebooks/` on Google Colab and drop the resulting `.pkl` files into
-`core/models/` whenever you want real trained predictions instead.
+Open `http://localhost:5173/` for Vadodara, or `http://localhost:5173/delhi`,
+`/mumbai`, `/ahmedabad`, `/pune`, `/surat` for the other airports. The dev
+server's SPA fallback means any of these paths load the same app; `App.jsx`
+reads the path once on load to pick the airport.
 
----
+Set `AEROTWIN_TIME_COMPRESSION` (default `4.0`) to change how many simulated
+seconds pass per wall-clock second; `1.0` runs in real time.
 
-## License
+## What's real vs representative
 
-Code in this repository is released under the MIT License - see LICENSE.
-Datasets referenced above are not covered by this license and remain under
-their original terms (BTS/US Government open data, OpenFlights' attribution
-terms, IEM's open METAR archive terms).
+VABO's runway thresholds, dimensions, and CAT I status are surveyed from
+public sources and drive every other measurement on the field (taxiway
+offset, hold-short distance, stand spacing). The other five airports use real
+runway thresholds with a representative, not charted, apron and taxiway
+arrangement - flagged as `"detail": "representative"` in `GET /api/airports`.
+This is a simulation and training tool, not a navigation reference.
 
----
+## Extending to another airport
 
-## Author
-
-Abhinav Mishra
-B.Tech, AI & Data Science - Gati Shakti Vishwavidyalaya (GSV)
-Head, TechnoCrats - ex-DFCCIL, ex-Indian Railways (DRM Office, S&T)
+Add one function to `core/airports/__init__.py` that calls
+`core.airports.generic.build_airport(...)` with the new airport's runway
+thresholds and apron parameters, and register it in `_BUILDERS`. Everything
+else - routing, locking, separation, the frontend - works unchanged, because
+none of it knows it isn't looking at VABO.
