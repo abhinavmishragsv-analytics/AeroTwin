@@ -25,16 +25,6 @@ const STATUS_TINT = {
   diverted: [255, 130, 130],
 };
 
-// Position/orientation transitions are tuned to the backend's broadcast rate
-// (core/config.py STREAM_HZ, default 15 Hz) in milliseconds, so the client is
-// never interpolating across a gap wider than one real update - faster than
-// that and motion stutters between frames, slower and it lags visibly behind.
-// Hardcoded rather than fetched: it's a rendering constant, not live state,
-// and matches the server default (override AEROTWIN_STREAM_HZ on both ends
-// together if you ever change it).
-const STREAM_HZ = 15.0;
-const FRAME_MS = Math.round(1000 / STREAM_HZ);
-
 // A modest fuselage-length trim (see getScale below) - 1.0 would be the
 // model's true proportions; smaller shortens it. 0.88 reads as "slightly
 // shorter", not a visibly different aircraft.
@@ -43,6 +33,7 @@ const FUSELAGE_LENGTH_FACTOR = 0.88;
 export function buildAircraftLayers(flights, opts = {}) {
   const showLabels = opts.showLabels !== false;
   const data = flights || [];
+  const selectedId = opts.selectedId || null;
 
   const layers = [
     new ScenegraphLayer({
@@ -65,19 +56,28 @@ export function buildAircraftLayers(flights, opts = {}) {
         // needs to be shorter or longer still.
         return [s * FUSELAGE_LENGTH_FACTOR, s, s];
       },
-      getColor: (d) => [...(STATUS_TINT[d.status] || [255, 255, 255]), 255],
+      getColor: (d) =>
+        d.id === selectedId
+          ? [120, 200, 255, 255]
+          : [...(STATUS_TINT[d.status] || [255, 255, 255]), 255],
       sizeScale: 1,
       _lighting: "pbr",
       pickable: true,
-      transitions: {
-        getPosition: FRAME_MS * 3,
-        getOrientation: FRAME_MS * 3,
-      },
+      // Selection itself is handled by DeckGL's top-level onClick in
+      // App.jsx (it needs to tell a hit on THIS layer apart from a click on
+      // the airfield beneath it, which is also pickable-adjacent); this
+      // layer only needs to stay pickable and reflect the current selection
+      // in its color.
+      // No deck.gl `transitions` here on purpose: `data` already arrives
+      // pre-interpolated every animation frame (see
+      // ui/src/lib/motionInterpolator.js), which is smoother than tweening
+      // linearly between two 15 Hz broadcast snapshots and would otherwise
+      // fight with that interpolation instead of complementing it.
       updateTriggers: {
         getPosition: data,
         getOrientation: data,
         getScale: data,
-        getColor: data,
+        getColor: [data, selectedId],
       },
     }),
   ];

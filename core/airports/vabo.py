@@ -43,8 +43,12 @@ from core.airports.schema import (
 from core.geo import bearing_deg, destination, distance_m, offset
 
 # --- Surveyed runway thresholds --------------------------------------------
-THR_04 = (22.32970, 73.21930)
-THR_22 = (22.34560, 73.23610)
+# Re-surveyed against published threshold coordinates (AAI/OurAirports-class
+# data) rather than eyeballed satellite imagery - the earlier pair was
+# visibly off (by ~150-200 m) from where the pavement actually sits on the
+# MapLibre satellite basemap.
+THR_04 = (22.32820, 73.21800)
+THR_22 = (22.34410, 73.23460)
 
 RWY_HEADING = bearing_deg(THR_04, THR_22)          # ~44.34 deg true
 RWY_LENGTH = distance_m(THR_04, THR_22)            # ~2472 m

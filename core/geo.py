@@ -121,6 +121,73 @@ def point_along_path(points, distance):
     return points[-1], bearing_deg(points[-2], points[-1])
 
 
+def smooth_path(points, spacing_m=6.0, alpha=0.5):
+    """Round a polyline's corners into a continuous curve.
+
+    `_traverse()` (core/twin_sim.py) drives every aircraft along the raw
+    taxiway-graph polyline: a sequence of straight segments joined at nodes
+    (spine stations, hold bars, runway entries). Between nodes that's fine -
+    taxiways really are straight - but AT a node the direction of travel
+    changes instantaneously, while the aircraft's heading is only allowed to
+    turn at MAX_TURN_RATE_DEG_S. Position (which snaps exactly onto the
+    polyline) and heading (which is still catching up) disagree for a moment
+    at every corner, and that mismatch is what reads as blocky, hitching
+    motion through turns.
+
+    This runs a centripetal Catmull-Rom spline through the same points -
+    still passing through every one of them exactly (so hold-short bars,
+    runway thresholds and stand centrelines stay exactly where the airfield
+    generator put them) - and returns a much finer polyline whose bearing
+    changes continuously through what used to be a corner. Centripetal
+    (alpha=0.5) rather than uniform parameterisation matters here because
+    taxiway stations are unevenly spaced; uniform Catmull-Rom can loop or
+    overshoot on that kind of input, centripetal never does.
+    """
+    if len(points) < 3:
+        return list(points)
+    ref = points[0]
+    xy = [to_local_xy(p, ref) for p in points]
+    padded = [xy[0]] + xy + [xy[-1]]
+
+    def lerp2(a, b, t):
+        return (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
+
+    out = []
+    for i in range(1, len(padded) - 2):
+        p0, p1, p2, p3 = padded[i - 1], padded[i], padded[i + 1], padded[i + 2]
+        seg_len = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
+        if seg_len < 1e-6:
+            continue
+        n = max(2, int(seg_len / spacing_m))
+
+        def knot(t0, pa, pb):
+            d = max(1e-6, math.hypot(pb[0] - pa[0], pb[1] - pa[1])) ** alpha
+            return t0 + d
+
+        t0 = 0.0
+        t1 = knot(t0, p0, p1)
+        t2 = knot(t1, p1, p2)
+        t3 = knot(t2, p2, p3)
+        for k in range(n):
+            t = t1 + (t2 - t1) * (k / n)
+            a1 = lerp2(p0, p1, (t - t0) / (t1 - t0)) if t1 != t0 else p1
+            a2 = lerp2(p1, p2, (t - t1) / (t2 - t1)) if t2 != t1 else p2
+            a3 = lerp2(p2, p3, (t - t2) / (t3 - t2)) if t3 != t2 else p3
+            b1 = lerp2(a1, a2, (t - t0) / (t2 - t0)) if t2 != t0 else a2
+            b2 = lerp2(a2, a3, (t - t1) / (t3 - t1)) if t3 != t1 else a3
+            out.append(lerp2(b1, b2, (t - t1) / (t2 - t1)) if t2 != t1 else b1)
+    out.append(xy[-1])
+
+    mlat, mlng = M_PER_DEG_LAT, m_per_deg_lng(ref[0])
+    result = [(ref[0] + ny / mlat, ref[1] + ex / mlng) for ex, ny in out]
+
+    deduped = [result[0]]
+    for p in result[1:]:
+        if distance_m(p, deduped[-1]) > 0.15:
+            deduped.append(p)
+    return deduped if len(deduped) >= 2 else list(points)
+
+
 def ribbon(points, width_m):
     """Turn a centreline polyline into a closed [lng, lat] polygon of given width.
 

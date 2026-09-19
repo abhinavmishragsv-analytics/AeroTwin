@@ -18,16 +18,22 @@ from core.airports import vabo
 
 
 def _vidp():
-    # Indira Gandhi International, Delhi. Operating runway here is 11/29
-    # (the northern runway); 10/28 and 09/27 are drawn for context.
+    # Indira Gandhi International, Delhi. Real IGIA has FOUR runways, not
+    # three: two near-parallel 11/29s (11R/29L - the longest, and 11L/29R),
+    # plus 10/28 and 09/27. Thresholds below are the published runway-end
+    # coordinates for all four; the earlier build modelled only one 11/29
+    # runway (treating it as a single "11/29" instead of the real L/R pair)
+    # and had all three of its thresholds displaced ~1-4 km from where the
+    # real pavement sits.
     return build_airport(
         icao="VIDP", iata="DEL", name="Indira Gandhi International Airport",
         city="Delhi", slug="delhi",
-        thresholds=((28.57210, 77.09310), (28.56220, 77.13380)),
-        idents=("11", "29"),
+        thresholds=((28.54720, 77.06550), (28.53770, 77.10950)),  # 11R/29L
+        idents=("11R", "29L"),
         extra_runways=[
-            ("10/28", (28.55790, 77.08600), (28.54900, 77.12500), "10", "28", 60.0),
-            ("09/27", (28.56690, 77.10960), (28.56060, 77.13760), "09", "27", 45.0),
+            ("11L/29R", (28.55010, 77.06820), (28.54070, 77.11190), "11L", "29R", 45.0),
+            ("10/28", (28.56720, 77.08480), (28.55850, 77.12250), "10", "28", 45.0),
+            ("09/27", (28.57050, 77.08800), (28.56980, 77.11700), "09", "27", 45.0),
         ],
         elevation_m=237.0, runway_width=60.0,
         taxiway_offset=-210.0, apron_lane_offset=-330.0, stand_offset=-390.0,
@@ -47,13 +53,16 @@ def _vidp():
 
 
 def _vabb():
-    # Chhatrapati Shivaji Maharaj International, Mumbai. Main runway 09/27.
+    # Chhatrapati Shivaji Maharaj International, Mumbai. Main runway 09/27,
+    # intersecting 14/32. Thresholds re-surveyed against published runway-end
+    # coordinates - the earlier 09/27 pair had the 27 end ~450 m north of
+    # where the real runway lies, skewing its heading off the true 89 deg.
     return build_airport(
         icao="VABB", iata="BOM", name="Chhatrapati Shivaji Maharaj International Airport",
         city="Mumbai", slug="mumbai",
-        thresholds=((19.08880, 72.85060), (19.09300, 72.87980)),
+        thresholds=((19.08840, 72.84800), (19.08890, 72.88110)),
         idents=("09", "27"),
-        extra_runways=[("14/32", (19.10300, 72.85900), (19.08250, 72.87600), "14", "32", 45.0)],
+        extra_runways=[("14/32", (19.09850, 72.85730), (19.08010, 72.87720), "14", "32", 45.0)],
         elevation_m=11.0, runway_width=60.0,
         taxiway_offset=-200.0, apron_lane_offset=-320.0, stand_offset=-380.0,
         terminal_offset=-480.0,
@@ -69,11 +78,12 @@ def _vabb():
 
 
 def _vaah():
-    # Sardar Vallabhbhai Patel International, Ahmedabad. Runway 05/23.
+    # Sardar Vallabhbhai Patel International, Ahmedabad. Runway 05/23,
+    # re-surveyed against published threshold coordinates.
     return build_airport(
         icao="VAAH", iata="AMD", name="Sardar Vallabhbhai Patel International Airport",
         city="Ahmedabad", slug="ahmedabad",
-        thresholds=((23.05930, 72.61540), (23.08150, 72.64030)),
+        thresholds=((23.06600, 72.62270), (23.08840, 72.64660)),
         idents=("05", "23"),
         elevation_m=58.0,
         n_contact_stands=10, n_remote_stands=6,
@@ -118,6 +128,25 @@ def _vasu():
     )
 
 
+def _vegt():
+    # Lokpriya Gopinath Bordoloi International, Guwahati. Runway 02/20, the
+    # main gateway to North-East India. Single runway, joint civil/military.
+    return build_airport(
+        icao="VEGT", iata="GAU", name="Lokpriya Gopinath Bordoloi International Airport",
+        city="Guwahati", slug="guwahati",
+        thresholds=((26.09470, 91.58060), (26.11750, 91.59120)),
+        idents=("02", "20"),
+        elevation_m=49.0, runway_width=46.0,
+        n_contact_stands=9, n_remote_stands=5,
+        movements_per_hour=16,
+        fleet_mix={"A20N": 0.40, "B738": 0.14, "A321": 0.16, "AT76": 0.20, "Q400": 0.10},
+        airlines=["6E", "AI", "SG", "UK", "IX"],
+        ils=("CAT_I", "NONE"), minima=((1200, 200), (2400, 400)),
+        default_wind_dir_deg=20.0, default_wind_kt=7.0,
+        notes="Runway thresholds are real; apron/stand arrangement is representative, not charted.",
+    )
+
+
 _BUILDERS = {
     "VABO": vabo.build,
     "VIDP": _vidp,
@@ -125,6 +154,7 @@ _BUILDERS = {
     "VAAH": _vaah,
     "VAPO": _vapo,
     "VASU": _vasu,
+    "VEGT": _vegt,
 }
 
 DEFAULT_ICAO = "VABO"

@@ -67,6 +67,7 @@ from core.geo import (
     lerp_heading,
     path_length_m,
     point_along_path,
+    smooth_path,
 )
 from core.models import registry
 
@@ -326,6 +327,7 @@ class Aerodrome:
             "wake": ac_type.wake,
             "category": ac_type.category,
             "model_scale": ac_type.model_scale,
+            "seats": ac_type.seats,
             "direction": direction,
             "status": "scheduled",
             "lat": 0.0, "lng": 0.0, "altitude": 0.0,
@@ -381,6 +383,12 @@ class Aerodrome:
         points = [p for i, p in enumerate(points) if i == 0 or distance_m(p, points[i - 1]) > 0.2]
         if len(points) < 2:
             return
+        # Round corners into a continuous curve before driving the kinematic
+        # model along it - see smooth_path() for why the raw node-to-node
+        # polyline is what made turns look blocky. This still passes through
+        # every original waypoint, so nothing downstream (hold bars, runway
+        # thresholds) moves.
+        points = smooth_path(points)
         total = path_length_m(points)
         if total <= 0.5:
             return
