@@ -105,6 +105,12 @@ class TaxiEdge:
     # A closed edge is removed from routing entirely (see the taxiway_closure
     # disruption) - aircraft reroute around it rather than driving through it.
     closed: bool = False
+    # Name of a runway this edge physically crosses, if any. An aircraft may
+    # not traverse it without that runway's clearance - at a multi-runway
+    # aerodrome the route from the apron to one runway routinely crosses
+    # another, and taxiing across an active runway unannounced is the single
+    # worst thing a ground movement model can get wrong.
+    crosses_runway: Optional[str] = None
 
     def nodes(self):
         return (self.u, self.v)
@@ -277,3 +283,39 @@ def merge_close_nodes(nodes: dict, edges: dict, min_sep_m: float = MIN_NODE_SEPA
         seen_pairs[key] = eid
         rewired[eid] = edge
     return nodes, rewired
+
+
+def mark_runway_crossings(layout):
+    """Flag every taxi edge that physically crosses a runway.
+
+    Edges that legitimately meet a runway at its surface - the runway links
+    from a holding point to a runway entry, and the rapid exits - are skipped:
+    they touch the centreline at an endpoint by design and are already
+    governed by the runway occupancy resource. What this is looking for is the
+    other case, a taxiway that cuts straight across a runway on its way
+    somewhere else, which at a multi-runway airport is the normal way to reach
+    the far runway from the apron.
+    """
+    from core.geo import segments_intersect
+
+    ref = layout.arp
+    for edge in layout.edges.values():
+        if edge.kind in ("runway_link", "rapid_exit"):
+            continue
+        u, v = layout.nodes.get(edge.u), layout.nodes.get(edge.v)
+        if u is None or v is None:
+            continue
+        if u.kind in ("runway_entry", "runway_exit") or v.kind in ("runway_entry", "runway_exit"):
+            continue
+        pts = layout.edge_points(edge)
+        hit = None
+        for rwy in layout.runways:
+            a, b = rwy.ends[0].threshold, rwy.ends[1].threshold
+            for i in range(len(pts) - 1):
+                if segments_intersect(pts[i], pts[i + 1], a, b, ref):
+                    hit = rwy.name
+                    break
+            if hit:
+                break
+        edge.crosses_runway = hit
+    return layout

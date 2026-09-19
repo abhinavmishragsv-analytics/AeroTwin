@@ -89,7 +89,22 @@ class Aerodrome:
         self.stands = atc_mod.StandManager(env, layout)
         # The twin operates one runway at a time; extra runways at multi-runway
         # airports are drawn but not yet independently sequenced.
-        self.runway_ctl = atc_mod.RunwayController(env, layout, layout.runways[0])
+        # One controller per runway. Runways whose centrelines physically
+        # intersect cannot be used independently - a departure on one and a
+        # landing on the other would meet at the crossing - so they share a
+        # single occupancy resource and are sequenced as one runway, which is
+        # what Mumbai actually does with 09/27 and 14/32.
+        self.runway_ctls = {}
+        for rwy in layout.runways:
+            ctl = atc_mod.RunwayController(env, layout, rwy)
+            for other_name, other in self.runway_ctls.items():
+                if self._runways_intersect(rwy, other.runway):
+                    ctl.resource = other.resource
+                    break
+            self.runway_ctls[rwy.name] = ctl
+        # The primary runway remains the default for anything that has not
+        # been assigned one yet (snapshots, seeding, back-compatible callers).
+        self.runway_ctl = self.runway_ctls[layout.runways[0].name]
         self.monitor = atc_mod.SeparationMonitor()
 
         self.flights = {}
@@ -122,7 +137,8 @@ class Aerodrome:
             "total_hold_s": 0.0,
         }
 
-        self.runway_ctl.select_active_end(self.weather["wind_dir_deg"], self.weather["wind_kt"])
+        for _c in self.runway_ctls.values():
+            _c.select_active_end(self.weather["wind_dir_deg"], self.weather["wind_kt"])
         self._seed_apron()
 
     # =====================================================================
@@ -195,6 +211,44 @@ class Aerodrome:
             return False
         return True
 
+    @staticmethod
+    def _runways_intersect(r1, r2):
+        from core.geo import segments_intersect
+        return segments_intersect(r1.ends[0].threshold, r1.ends[1].threshold,
+                                  r2.ends[0].threshold, r2.ends[1].threshold,
+                                  r1.ends[0].threshold)
+
+    def assign_runway(self, ac, role):
+        """Pick a runway for this aircraft.
+
+        Filters on what the runway can physically do for this type - enough
+        length for its takeoff or landing distance, and an end the wind
+        actually allows - then balances across whatever is left, so a
+        multi-runway airport spreads its traffic instead of queueing
+        everything onto the first runway in the list.
+        """
+        usable = []
+        for ctl in self.runway_ctls.values():
+            if ctl.is_closed():
+                continue
+            ok = (ctl.takeoff_allowed(self.weather)[0] if role == "DEP"
+                  else ctl.landing_allowed(self.weather)[0])
+            if not ok:
+                continue
+            need = ac.todr_m * 1.05 if role == "DEP" else ac.ldr_m * 1.15
+            if ctl.runway.length_m < need:
+                continue
+            usable.append(ctl)
+        if not usable:
+            return self.runway_ctl
+        # Least-loaded first: queued departures plus sequenced arrivals.
+        return min(usable, key=lambda c: len(c.departure_queue) + len(c.arrival_sequence)
+                   + len(c.resource.queue))
+
+    def controller_for(self, f):
+        """The runway controller this flight is operating on."""
+        return f.get("_ctl") or self.runway_ctl
+
     def accepts_departure(self):
         """Whether to push another aircraft onto stand as a fresh departure.
 
@@ -262,8 +316,9 @@ class Aerodrome:
             queue_depth=self.queue_depth(),
         )
 
-    def _new_flight(self, direction, ac_type, stand=None):
+    def _new_flight(self, direction, ac_type, stand=None, ctl=None):
         fid = self._next_callsign()
+        ctl = ctl or self.runway_ctl
         self.flights[fid] = {
             "id": fid,
             "type": ac_type.code,
@@ -280,7 +335,9 @@ class Aerodrome:
             "route": None,
             "cleared_to": None,
             "hold_reason": None,
-            "runway": self.runway_ctl.active_end_ident,
+            "runway": ctl.active_end_ident,
+            "runway_name": ctl.runway.name,
+            "_ctl": ctl,
             "other_airport": self.rng.choice([d for d in DESTINATIONS if d != self.layout.icao]),
             "risk": self._risk(),
             "delay_min": 0.0,
@@ -394,9 +451,10 @@ class Aerodrome:
     def _plan_departure_route(self, f, stand):
         """Choose a holding point that gives enough runway, then route to it."""
         ac = fleet.get(f["type"])
+        ctl = self.controller_for(f)
         candidates = []
-        for node in self.layout.hold_short_nodes(self.runway_ctl.active_end_ident):
-            usable = self.runway_ctl.runway.length_m - self.runway_along(node.pos)
+        for node in self.layout.hold_short_nodes(ctl.active_end_ident):
+            usable = ctl.runway.length_m - self.runway_along(node.pos, ctl)
             if usable < ac.todr_m * 1.05:
                 continue            # intersection departure not legal for this type
             route = routing.plan(self.layout, stand.node_id, node.id)
@@ -412,7 +470,7 @@ class Aerodrome:
         f["takeoff_run_m"] = round(usable)
         return node, route
 
-    def runway_along(self, pos):
+    def runway_along(self, pos, ctl=None):
         """Along-track distance of a point from the active landing threshold.
 
         Taxiway nodes sit beside the runway, not on it, so a straight range is
@@ -421,8 +479,9 @@ class Aerodrome:
         turn-off selection and intersection-departure length correct in either
         runway direction.
         """
-        rwy = self.runway_ctl.runway
-        end = self.runway_ctl.active_end()
+        ctl = ctl or self.runway_ctl
+        rwy = ctl.runway
+        end = ctl.active_end()
         opp = rwy.opposite(end.ident)
         L = rwy.length_m
         d_near = distance_m(end.threshold, pos)
@@ -446,10 +505,11 @@ class Aerodrome:
         A rapid exit is preferred; a right-angle link is the fallback.
         """
         ac = fleet.get(f["type"])
-        rwy = self.runway_ctl.runway
+        ctl = self.controller_for(f)
+        rwy = ctl.runway
         options = []
         for node in self.layout.runway_access_nodes(rwy.name):
-            along = self.runway_along(node.pos)
+            along = self.runway_along(node.pos, ctl)
             if along < ac.ldr_m * 0.8:
                 continue                  # still too fast to turn off here
             if along > rwy.length_m - 60:
@@ -475,13 +535,14 @@ class Aerodrome:
     def operate_arrival(self, ac_type=None, attempt_start=0):
         """Full arrival, ending either parked (and turned round) or diverted."""
         ac = ac_type or fleet.pick_type(self.layout.fleet_mix, self.rng)
-        f = self._new_flight("ARR", ac)
+        f = self._new_flight("ARR", ac, ctl=self.assign_runway(ac, "ARR"))
+        ctl = self.controller_for(f)
         fid = f["id"]
         f["on_ground"] = False
         f["status"] = "inbound"
 
         self._last_arrival_spawn_t = self.env.now
-        end = self.runway_ctl.active_end()
+        end = ctl.active_end()
         approach_brg = (end.heading_deg + 180) % 360
         faf = destination(end.threshold, approach_brg, FINAL_APPROACH_FIX_M)
         # Inbounds join from different radials and ranges rather than all
@@ -535,8 +596,9 @@ class Aerodrome:
              pattern at its own level in the stack, and goes around only once it
              has run out of patience.
         """
+        ctl = self.controller_for(f)
         fid = f["id"]
-        end = self.runway_ctl.active_end()
+        end = ctl.active_end()
         approach_brg = (end.heading_deg + 180) % 360
         gs = math.tan(math.radians(GLIDESLOPE_DEG))
         faf_alt = FINAL_APPROACH_FIX_M * gs
@@ -588,7 +650,7 @@ class Aerodrome:
             # --- can the aerodrome actually take us? ---------------------
             while True:
                 blocked = None
-                ok, reason = self.runway_ctl.landing_allowed(self.weather)
+                ok, reason = ctl.landing_allowed(self.weather)
                 if not ok:
                     blocked = reason
                 elif self.stands.free_stand(ac) is None:
@@ -605,13 +667,13 @@ class Aerodrome:
                         blocked = "runway exit occupied"
 
                 if blocked is None:
-                    req = self.runway_ctl.request(fid, "ARR")
-                    if fid not in self.runway_ctl.arrival_sequence:
-                        self.runway_ctl.arrival_sequence.append(fid)
+                    req = ctl.request(fid, "ARR")
+                    if fid not in ctl.arrival_sequence:
+                        ctl.arrival_sequence.append(fid)
                     deadline = self.env.now + max(45.0, (FINAL_APPROACH_FIX_M - DECISION_RANGE_M) /
                                                   max(1.0, ac.approach_speed_kt * KT))
                     f["status"] = "approach"
-                    f["cleared_to"] = f"number {len(self.runway_ctl.arrival_sequence)} for {end.ident}"
+                    f["cleared_to"] = f"number {len(ctl.arrival_sequence)} for {end.ident}"
                     radius, alt = _hold_geometry()
                     while not req.triggered and self.env.now < deadline:
                         # A quarter orbit at a time, so the decision to go
@@ -620,11 +682,11 @@ class Aerodrome:
                                                      speed_kt=max(180, ac.approach_speed_kt + 40))
                     if not req.triggered:
                         req.cancel()
-                        self.runway_ctl.resource.release(req)
+                        ctl.resource.release(req)
                         req = None
                         self.ground.release_all(fid)
-                        if fid in self.runway_ctl.arrival_sequence:
-                            self.runway_ctl.arrival_sequence.remove(fid)
+                        if fid in ctl.arrival_sequence:
+                            ctl.arrival_sequence.remove(fid)
                         f["hold_reason"] = "runway not available at decision point"
                         yield from self._go_around_path(f, ac)
                         return False
@@ -666,24 +728,24 @@ class Aerodrome:
                     pitch_fn=lambda p: -1.5)
 
             # Wake separation behind the preceding movement.
-            gap = self.runway_ctl.separation_wait_s(ac, "ARR")
+            gap = ctl.separation_wait_s(ac, "ARR")
             if gap > 0:
                 f["status"] = "final"
                 f["hold_reason"] = f"spacing {int(gap)}s"
                 yield self.env.timeout(min(gap, 75))
 
-            ok, reason = self.runway_ctl.landing_allowed(self.weather)
+            ok, reason = ctl.landing_allowed(self.weather)
             if not ok:
-                self.runway_ctl.resource.release(req)
+                ctl.resource.release(req)
                 req = None
                 self.ground.release_all(fid)
-                if fid in self.runway_ctl.arrival_sequence:
-                    self.runway_ctl.arrival_sequence.remove(fid)
+                if fid in ctl.arrival_sequence:
+                    ctl.arrival_sequence.remove(fid)
                 f["hold_reason"] = reason
                 yield from self._go_around_path(f, ac)
                 return False
 
-            self.runway_ctl.occupy(fid, "ARR", ac)
+            ctl.occupy(fid, "ARR", ac)
             f["status"] = "final"
             f["hold_reason"] = None
             f["cleared_to"] = f"cleared to land {end.ident}"
@@ -721,11 +783,11 @@ class Aerodrome:
                 f, exit_points, max(8, exit_speed), max(10, exit_speed), 10,
                 accel=0.8, decel=1.4, alt_fn=lambda p, s, t: 0.0, pitch_fn=lambda p: 0.0)
 
-            self.runway_ctl.vacate(fid, ac, "ARR")
-            self.runway_ctl.resource.release(req)
+            ctl.vacate(fid, ac, "ARR")
+            ctl.resource.release(req)
             req = None
-            if fid in self.runway_ctl.arrival_sequence:
-                self.runway_ctl.arrival_sequence.remove(fid)
+            if fid in ctl.arrival_sequence:
+                ctl.arrival_sequence.remove(fid)
             f["_exit_node"] = exit_edge.v if exit_edge.u == exit_node.id else exit_edge.u
             f["_exit_edge"] = exit_edge.id
             f["exit_via"] = exit_node.label or exit_node.id
@@ -745,7 +807,8 @@ class Aerodrome:
         circle at the same altitude - which is what a real missed approach
         procedure achieves with published altitudes and tracks.
         """
-        end = self.runway_ctl.active_end()
+        ctl = self.controller_for(f)
+        end = ctl.active_end()
         self.metrics["go_arounds"] += 1
         level = self._claim_hold_level()
         f["hold_level"] = level
@@ -777,10 +840,11 @@ class Aerodrome:
         f.pop("hold_level", None)
 
     def _divert(self, f):
+        ctl = self.controller_for(f)
         self.metrics["diversions"] += 1
         f["status"] = "diverted"
         f["cleared_to"] = f"diverting to {f['other_airport']}"
-        end = self.runway_ctl.active_end()
+        end = ctl.active_end()
         away = destination((f["lat"], f["lng"]), (end.heading_deg + 120) % 360, 22000)
         yield from self._traverse(
             f, [(f["lat"], f["lng"]), away], 220, 260, 260,
@@ -838,11 +902,36 @@ class Aerodrome:
         for li, (edge, forward) in enumerate(legs):
             pts = self.layout.edge_points(edge, forward)
             is_last = li == len(legs) - 1
-            yield from self._traverse(
-                f, pts, v_entry if li == 0 else v_cruise, v_cruise,
-                v_exit if is_last else v_cruise,
-                accel=0.8, decel=1.2,
-                alt_fn=lambda p, s, t: 0.0, pitch_fn=lambda p: 0.0)
+
+            # Runway crossing. At a multi-runway aerodrome the way from the
+            # apron to one runway routinely crosses another, and taxiing
+            # across an active runway unannounced is the worst thing a ground
+            # model can get wrong - so the aircraft takes that runway's
+            # occupancy for the crossing, exactly as it would be held and then
+            # cleared to cross in reality.
+            crossing_ctl = None
+            crossing_req = None
+            if edge.crosses_runway:
+                crossing_ctl = self.runway_ctls.get(edge.crosses_runway)
+            if crossing_ctl is not None:
+                f["status"] = "hold_short"
+                f["hold_reason"] = f"hold short of runway {crossing_ctl.runway.name}"
+                crossing_req = crossing_ctl.resource.request(
+                    priority=atc_mod.PRIORITY_DEPARTURE - 1)
+                yield crossing_req
+                f["cleared_to"] = f"cross runway {crossing_ctl.runway.name}"
+                f["hold_reason"] = None
+                f["status"] = status_label
+
+            try:
+                yield from self._traverse(
+                    f, pts, v_entry if li == 0 else v_cruise, v_cruise,
+                    v_exit if is_last else v_cruise,
+                    accel=0.8, decel=1.2,
+                    alt_fn=lambda p, s, t: 0.0, pitch_fn=lambda p: 0.0)
+            finally:
+                if crossing_req is not None:
+                    crossing_ctl.resource.release(crossing_req)
 
     def _taxi_in(self, f, ac):
         """From the runway turn-off to an allocated stand."""
@@ -972,6 +1061,11 @@ class Aerodrome:
         yield self.env.timeout(turn_s)
 
         f["direction"] = "DEP"
+        # The outbound leg gets its own runway assignment - wind, closures and
+        # load may all have changed during the turnaround.
+        f["_ctl"] = self.assign_runway(ac, "DEP")
+        f["runway"] = f["_ctl"].active_end_ident
+        f["runway_name"] = f["_ctl"].runway.name
         f["other_airport"] = self.rng.choice([d for d in DESTINATIONS if d != self.layout.icao])
         f["approach_attempt"] = 0
         f["risk"] = self._risk()
@@ -985,7 +1079,7 @@ class Aerodrome:
             stand = self.stands.free_stand(ac)
             if stand is None:
                 return
-        f = self._new_flight("DEP", ac, stand)
+        f = self._new_flight("DEP", ac, stand, ctl=self.assign_runway(ac, "DEP"))
         yield from self.stands.occupy(f["id"], stand.id)
         f["lat"], f["lng"] = stand.pos
         f["heading"] = stand.heading_deg
@@ -994,6 +1088,7 @@ class Aerodrome:
         yield from self._depart_from_stand(f, ac, stand)
 
     def _depart_from_stand(self, f, ac, stand):
+        ctl = self.controller_for(f)
         fid = f["id"]
         ready_t = self.env.now
 
@@ -1100,28 +1195,28 @@ class Aerodrome:
 
         # --- hold short ---------------------------------------------------
         f["status"] = "hold_short"
-        f["cleared_to"] = f"holding short {self.runway_ctl.active_end_ident} at {hold_node.label}"
+        f["cleared_to"] = f"holding short {ctl.active_end_ident} at {hold_node.label}"
         f["heading"] = bearing_deg(hold_node.pos, self.layout.nodes[self._runway_entry_for(hold_node)].pos)
-        if fid not in self.runway_ctl.departure_queue:
-            self.runway_ctl.departure_queue.append(fid)
+        if fid not in ctl.departure_queue:
+            ctl.departure_queue.append(fid)
 
         while True:
             if self.ground_stop:
                 f["hold_reason"] = self.ground_stop_reason or "ground stop"
                 yield self.env.timeout(10)
                 continue
-            ok, reason = self.runway_ctl.takeoff_allowed(self.weather)
+            ok, reason = ctl.takeoff_allowed(self.weather)
             if not ok:
                 f["hold_reason"] = reason
                 yield self.env.timeout(10)
                 continue
-            if self.runway_ctl.active_end_ident != f["runway"]:
+            if ctl.active_end_ident != f["runway"]:
                 # Runway direction changed while we were holding: re-plan.
                 f["hold_reason"] = "runway change - re-routing"
-                f["runway"] = self.runway_ctl.active_end_ident
+                f["runway"] = ctl.active_end_ident
                 new_hold, new_route = self._plan_departure_route(f, stand)
                 if new_hold and new_hold.id != hold_node.id:
-                    self.runway_ctl.departure_queue.remove(fid)
+                    ctl.departure_queue.remove(fid)
                     self.ground.release_all(fid)
                     new_keys = self.ground.route_keys(new_route)
                     while not self.ground.try_acquire(fid, new_keys):
@@ -1129,7 +1224,7 @@ class Aerodrome:
                     yield from self._traverse(f, new_route.points(), 3, taxi_kt, 3,
                                               alt_fn=lambda p, s, t: 0.0)
                     hold_node = new_hold
-                    self.runway_ctl.departure_queue.append(fid)
+                    ctl.departure_queue.append(fid)
                 continue
             break
 
@@ -1146,16 +1241,16 @@ class Aerodrome:
         while True:
             priority = max(atc_mod.PRIORITY_EMERGENCY + 1,
                            atc_mod.PRIORITY_DEPARTURE - waited / 25.0)
-            req = self.runway_ctl.resource.request(priority=priority)
+            req = ctl.resource.request(priority=priority)
             outcome = yield req | self.env.timeout(30)
             if req in outcome:
                 break
             req.cancel()
-            self.runway_ctl.resource.release(req)
+            ctl.resource.release(req)
             waited += 30
-            f["hold_reason"] = f"number {self.runway_ctl.departure_queue.index(fid) + 1 if fid in self.runway_ctl.departure_queue else 1} for departure"
+            f["hold_reason"] = f"number {ctl.departure_queue.index(fid) + 1 if fid in ctl.departure_queue else 1} for departure"
             yield self.env.timeout(1)
-        gap = self.runway_ctl.separation_wait_s(ac, "DEP")
+        gap = ctl.separation_wait_s(ac, "DEP")
         entry_id = self._runway_entry_for(hold_node)
         entry = self.layout.nodes[entry_id]
         if link_edge is not None:
@@ -1164,17 +1259,17 @@ class Aerodrome:
                 yield self.env.timeout(5)
 
         f["status"] = "lineup"
-        f["cleared_to"] = f"line up and wait {self.runway_ctl.active_end_ident}"
-        self.runway_ctl.occupy(fid, "DEP", ac)
+        f["cleared_to"] = f"line up and wait {ctl.active_end_ident}"
+        ctl.occupy(fid, "DEP", ac)
         yield from self._traverse(
             f, [hold_node.pos, entry.pos], 3, 10, 1, accel=0.6, decel=0.8,
             alt_fn=lambda p, s, t: 0.0)
-        end = self.runway_ctl.active_end()
+        end = ctl.active_end()
         f["heading"] = end.heading_deg
         if gap > 0:
             yield from self._hold_position(f, gap, "lineup", f"wake separation {int(gap)}s")
-        if fid in self.runway_ctl.departure_queue:
-            self.runway_ctl.departure_queue.remove(fid)
+        if fid in ctl.departure_queue:
+            ctl.departure_queue.remove(fid)
 
         # --- takeoff roll --------------------------------------------------
         f["status"] = "takeoff_roll"
@@ -1182,7 +1277,7 @@ class Aerodrome:
         f["hold_reason"] = None
         rotate_point = destination(entry.pos, end.heading_deg,
                                    min(ac.todr_m * 0.78,
-                                       max(600.0, distance_m(entry.pos, self._far_threshold()) - 350)))
+                                       max(600.0, distance_m(entry.pos, self._far_threshold(ctl)) - 350)))
         yield from self._traverse(
             f, [entry.pos, rotate_point], 5, ac.v_rotate_kt, ac.v_rotate_kt,
             accel=2.0, decel=2.0,
@@ -1202,8 +1297,8 @@ class Aerodrome:
         def _release_when_clear(progress, s, total):
             if not released["done"] and s > 900:
                 released["done"] = True
-                self.runway_ctl.vacate(fid, ac, "DEP")
-                self.runway_ctl.resource.release(req)
+                ctl.vacate(fid, ac, "DEP")
+                ctl.resource.release(req)
                 self.ground.release_all(fid)
 
         yield from self._traverse(
@@ -1214,8 +1309,8 @@ class Aerodrome:
             on_progress=_release_when_clear,
         )
         if not released["done"]:
-            self.runway_ctl.vacate(fid, ac, "DEP")
-            self.runway_ctl.resource.release(req)
+            ctl.vacate(fid, ac, "DEP")
+            ctl.resource.release(req)
             self.ground.release_all(fid)
 
         self.stands.vacate(fid)
@@ -1231,9 +1326,10 @@ class Aerodrome:
                 return edge.v if edge.u == hold_node.id else edge.u
         return hold_node.id
 
-    def _far_threshold(self):
-        end = self.runway_ctl.active_end()
-        return self.runway_ctl.runway.opposite(end.ident).threshold
+    def _far_threshold(self, ctl=None):
+        ctl = ctl or self.runway_ctl
+        end = ctl.active_end()
+        return ctl.runway.opposite(end.ident).threshold
 
     # =====================================================================
     # Apron seeding
@@ -1263,8 +1359,9 @@ class Aerodrome:
         msg = None
 
         if kind in ("runway_closure", "maintenance_delay"):
-            self.runway_ctl.close_for(duration_s)
-            msg = (f"Runway {self.runway_ctl.runway.name} closed for "
+            for c in self.runway_ctls.values():
+                c.close_for(duration_s)
+            msg = (f"All runways ({', '.join(self.runway_ctls)}) closed for "
                    f"{duration_minutes:.0f} min - arrivals will hold or divert")
 
         elif kind == "ground_stop":
@@ -1300,7 +1397,8 @@ class Aerodrome:
         elif kind == "thunderstorm":
             self.weather.update({"visibility_m": 2200, "ceiling_ft": 700, "wind_kt": 28,
                                  "wet": True, "condition": "THUNDERSTORM"})
-            self.runway_ctl.close_for(min(duration_s, 900))
+            for c in self.runway_ctls.values():
+                c.close_for(min(duration_s, 900))
             self.env.process(self._auto(self._clear_weather, duration_s))
             msg = "Thunderstorm overhead - runway suspended, surface wet"
 
@@ -1318,7 +1416,8 @@ class Aerodrome:
             msg = "Emergency aircraft inbound - priority landing, all traffic held"
 
         elif kind == "clear":
-            self.runway_ctl.reopen()
+            for c in self.runway_ctls.values():
+                c.reopen()
             self.ground_stop = False
             self.ground_stop_reason = None
             self._clear_weather()
@@ -1352,6 +1451,9 @@ class Aerodrome:
     # =====================================================================
     def review_runway_direction(self):
         """Re-evaluate the runway in use against the current wind."""
+        for _c in self.runway_ctls.values():
+            _c.select_active_end(self.weather["wind_dir_deg"], self.weather["wind_kt"],
+                                 self.weather.get("wet", False))
         ident, assessment, usable = self.runway_ctl.select_active_end(
             self.weather["wind_dir_deg"], self.weather["wind_kt"], self.weather.get("wet", False))
         return ident, assessment, usable
@@ -1372,6 +1474,7 @@ class Aerodrome:
                 "slug": self.layout.slug,
             },
             "runway": self.runway_ctl.snapshot(),
+            "runways": [c.snapshot() for c in self.runway_ctls.values()],
             "wind": assessment,
             "wind_usable": wind_ok,
             "weather": self.weather,

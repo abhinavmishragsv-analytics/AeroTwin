@@ -173,3 +173,32 @@ def crosswind_component(wind_dir_deg: float, wind_kt: float, runway_heading_deg:
     """
     angle = math.radians(wind_dir_deg - runway_heading_deg)
     return wind_kt * math.cos(angle), abs(wind_kt * math.sin(angle))
+
+
+def to_local_xy(p, ref):
+    """Project a (lat, lng) to local east/north metres about a reference point."""
+    return ((p[1] - ref[1]) * m_per_deg_lng(ref[0]), (p[0] - ref[0]) * M_PER_DEG_LAT)
+
+
+def segments_intersect(a1, a2, b1, b2, ref):
+    """Whether two lat/lng segments cross, evaluated in local metres.
+
+    Used to find taxiway edges that cross a runway. At airfield scale the
+    local projection is exact enough that a crossing is never missed, and the
+    consequence of the answer - whether an aircraft needs runway crossing
+    clearance - is one that has to be right.
+    """
+    (x1, y1), (x2, y2) = to_local_xy(a1, ref), to_local_xy(a2, ref)
+    (x3, y3), (x4, y4) = to_local_xy(b1, ref), to_local_xy(b2, ref)
+
+    def orient(ax, ay, bx, by, cx, cy):
+        v = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax)
+        if abs(v) < 1e-9:
+            return 0
+        return 1 if v > 0 else -1
+
+    d1 = orient(x1, y1, x2, y2, x3, y3)
+    d2 = orient(x1, y1, x2, y2, x4, y4)
+    d3 = orient(x3, y3, x4, y4, x1, y1)
+    d4 = orient(x3, y3, x4, y4, x2, y2)
+    return d1 != d2 and d3 != d4

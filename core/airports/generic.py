@@ -12,10 +12,16 @@ single-occupancy edges, same hold-short positions - so `core.atc`,
 changes whatsoever. That is the whole point of keeping the twin's logic
 airport-agnostic: `/delhi` is a data change, not a code change.
 
-Secondary runways (Delhi's three, Mumbai's two) are included as *pavement and
-paint* so the picture is right, but the simulation currently works one runway
-at a time - the one selected as the active runway by wind. Multi-runway
-independent operations are a natural next step, not a pretence made here.
+Every runway gets the full treatment, not just the first: its own parallel
+taxiway, its own holding points and runway entries, its own rapid exits, and
+its own connections to the apron. Delhi's three runways and Mumbai's two are
+therefore genuinely operable rather than painted scenery, and the simulation
+allocates traffic across them.
+
+Where a taxiway has to cross another runway to reach the apron - which at a
+multi-runway aerodrome is the normal case, not an edge case - the edge is
+flagged by `mark_runway_crossings` and the aircraft must hold for that
+runway's clearance before crossing it.
 """
 from core.airports.schema import (
     AirportLayout,
@@ -25,6 +31,7 @@ from core.airports.schema import (
     Stand,
     TaxiEdge,
     TaxiNode,
+    mark_runway_crossings,
     merge_close_nodes,
 )
 from core.aircraft import get as get_ac_type
@@ -79,63 +86,90 @@ def build_airport(
                               width_m=width, max_speed_kt=speed, via=via or [])
         return eid
 
-    # --- Parallel taxiway with four runway links -------------------------
-    stations = {
-        "A1": 60.0,
-        "A2": length * 0.30,
-        "A3": length * 0.62,
-        "A4": length - 60.0,  # match A1's 60 m setback - see vabo.py for why the asymmetry matters
-    }
-    ordered = sorted(stations.items(), key=lambda kv: kv[1])
-    for sname, along in ordered:
-        node(f"TA_{sname}", rw(along, taxiway_offset), kind="taxi", label=sname)
-        node(f"HS_{sname}_{idents[0]}", rw(along, -90.0), kind="hold_short",
-             label=sname, runway=f"{idents[0]}/{idents[1]}", end_ident=idents[0])
-        node(f"RE_{sname}", rw(along, 0.0), kind="runway_entry", label=sname,
-             runway=f"{idents[0]}/{idents[1]}", end_ident=idents[0])
-        edge(f"E_TA_{sname}_HS", f"TA_{sname}", f"HS_{sname}_{idents[0]}", ename=sname, speed=15)
-        edge(f"E_HS_{sname}_RE", f"HS_{sname}_{idents[0]}", f"RE_{sname}",
-             kind="runway_link", ename=sname, speed=12)
+    # --- Taxi infrastructure, built once per runway ----------------------
+    # The apron sits on one side of the primary runway; every runway's
+    # parallel taxiway is placed on whichever of ITS sides faces the apron, so
+    # the taxiways all end up between the runways and the terminal rather than
+    # stranded on the far side of a runway from everything else.
+    apron_anchor = rw(length * apron_center_frac, apron_lane_offset)
 
-    for (n1, _), (n2, _) in zip(ordered, ordered[1:]):
-        edge(f"E_ALPHA_{n1}_{n2}", f"TA_{n1}", f"TA_{n2}", ename="A", speed=22)
+    def build_runway_taxiways(rw_name, thr_1, thr_2, id_1, id_2, prefix):
+        """Parallel taxiway, holding points, runway entries and rapid exits."""
+        r_head = bearing_deg(thr_1, thr_2)
+        r_len = distance_m(thr_1, thr_2)
 
-    # --- Rapid exits, one for each landing direction ---------------------
-    # Deliberately offset from the A2/A3 stations above: a rapid exit and a
-    # taxiway link at the same point on the runway would be two names for one
-    # place, and the twin would treat them as two independently lockable ones.
-    for rname, frac, serves in (("B1", 0.53, idents[0]), ("B2", 0.42, idents[1])):
-        along = length * frac
-        direction = 1 if serves == idents[0] else -1
-        node(f"RX_{rname}", rw(along, 0.0), kind="runway_exit", label=rname,
-             end_ident=serves, rapid=True,
-             exit_distance_m=along if serves == idents[0] else length - along)
-        node(f"TX_{rname}", rw(along + direction * 200.0, taxiway_offset), kind="taxi", label=rname)
-        edge(f"E_RX_{rname}", f"RX_{rname}", f"TX_{rname}", kind="rapid_exit", ename=rname, speed=30,
-             via=[rw(along + direction * 75.0, -60.0), rw(along + direction * 150.0, -145.0)])
+        def rrw(along, cross=0.0):
+            return offset(thr_1, r_head, along, cross)
 
-    # Splice rapid-exit junctions into the spine between the stations they fall between.
-    def _splice(tx_node):
-        target = distance_m(thr_a, nodes[tx_node].pos)
-        best = None
-        for eid, e in list(edges.items()):
-            if not eid.startswith("E_ALPHA_"):
-                continue
-            du = distance_m(thr_a, nodes[e.u].pos)
-            dv = distance_m(thr_a, nodes[e.v].pos)
-            lo, hi = min(du, dv), max(du, dv)
-            if lo <= target <= hi:
-                best = (eid, e)
-                break
-        if best is None:
-            return
-        eid, e = best
-        edges.pop(eid)
-        edge(f"{eid}_a", e.u, tx_node, ename="A", speed=22)
-        edge(f"{eid}_b", tx_node, e.v, ename="A", speed=22)
+        # Which side of THIS runway is the apron on? Cross-track sign of the
+        # apron anchor decides, so a runway on the far side of the field still
+        # gets its taxiway facing inwards.
+        d = distance_m(thr_1, apron_anchor)
+        brg = bearing_deg(thr_1, apron_anchor)
+        import math as _math
+        cross_track = d * _math.sin(_math.radians(brg - r_head))
+        side = -1.0 if cross_track < 0 else 1.0
+        twy_off = side * abs(taxiway_offset)
+        hold_off = side * 90.0
 
-    _splice("TX_B2")
-    _splice("TX_B1")
+        stations = {
+            f"{prefix}1": 60.0,
+            f"{prefix}2": r_len * 0.30,
+            f"{prefix}3": r_len * 0.62,
+            f"{prefix}4": r_len - 60.0,
+        }
+        ordered_st = sorted(stations.items(), key=lambda kv: kv[1])
+        for sname, along in ordered_st:
+            node(f"TA_{sname}", rrw(along, twy_off), kind="taxi", label=sname)
+            node(f"HS_{sname}_{id_1}", rrw(along, hold_off), kind="hold_short",
+                 label=sname, runway=rw_name, end_ident=id_1)
+            node(f"RE_{sname}", rrw(along, 0.0), kind="runway_entry", label=sname,
+                 runway=rw_name, end_ident=id_1)
+            edge(f"E_TA_{sname}_HS", f"TA_{sname}", f"HS_{sname}_{id_1}", ename=sname, speed=15)
+            edge(f"E_HS_{sname}_RE", f"HS_{sname}_{id_1}", f"RE_{sname}",
+                 kind="runway_link", ename=sname, speed=12)
+
+        for (n1, _), (n2, _) in zip(ordered_st, ordered_st[1:]):
+            edge(f"E_SPINE_{n1}_{n2}", f"TA_{n1}", f"TA_{n2}", ename=prefix, speed=22)
+
+        # Rapid exits, one per landing direction, offset from the stations so
+        # a rapid exit and a taxiway link are never two names for one place.
+        for tag, frac, serves in ((f"{prefix}X1", 0.53, id_1), (f"{prefix}X2", 0.42, id_2)):
+            along = r_len * frac
+            direction = 1 if serves == id_1 else -1
+            node(f"RX_{tag}", rrw(along, 0.0), kind="runway_exit", label=tag,
+                 runway=rw_name, end_ident=serves, rapid=True,
+                 exit_distance_m=along if serves == id_1 else r_len - along)
+            node(f"TX_{tag}", rrw(along + direction * 200.0, twy_off), kind="taxi", label=tag)
+            edge(f"E_RX_{tag}", f"RX_{tag}", f"TX_{tag}", kind="rapid_exit", ename=tag, speed=30,
+                 via=[rrw(along + direction * 75.0, side * 60.0),
+                      rrw(along + direction * 150.0, side * 145.0)])
+
+        def _splice_into_spine(tx_node):
+            target = distance_m(thr_1, nodes[tx_node].pos)
+            for eid, e in list(edges.items()):
+                if not eid.startswith(f"E_SPINE_{prefix}"):
+                    continue
+                du = distance_m(thr_1, nodes[e.u].pos)
+                dv = distance_m(thr_1, nodes[e.v].pos)
+                if min(du, dv) <= target <= max(du, dv):
+                    edges.pop(eid)
+                    edge(f"{eid}_a", e.u, tx_node, ename=prefix, speed=22)
+                    edge(f"{eid}_b", tx_node, e.v, ename=prefix, speed=22)
+                    return
+
+        _splice_into_spine(f"TX_{prefix}X2")
+        _splice_into_spine(f"TX_{prefix}X1")
+        return [f"TA_{n}" for n, _ in ordered_st]
+
+    runway_specs = [("%s/%s" % (idents[0], idents[1]), thr_a, thr_b, idents[0], idents[1])]
+    for rname, ta, tb, ia, ib, _w in extra_runways:
+        runway_specs.append((rname, ta, tb, ia, ib))
+
+    spine_nodes_by_runway = {}
+    for ri, (rw_name, t1, t2, i1, i2) in enumerate(runway_specs):
+        prefix = chr(ord("A") + ri)
+        spine_nodes_by_runway[rw_name] = build_runway_taxiways(rw_name, t1, t2, i1, i2, prefix)
 
     # --- Apron taxilane + stands -----------------------------------------
     total_stands = n_contact_stands + n_remote_stands
@@ -146,10 +180,41 @@ def build_airport(
     node("AP_N", rw(apron_start + apron_len + 60, apron_lane_offset), kind="apron", label="Apron N")
     node("TA_APS", rw(apron_start - 60, taxiway_offset), kind="taxi", label="A5")
     node("TA_APN", rw(apron_start + apron_len + 60, taxiway_offset), kind="taxi", label="A6")
-    _splice("TA_APS")
-    _splice("TA_APN")
+
+    # Splice the two apron entries into the PRIMARY runway's spine.
+    def _splice_primary(tx_node):
+        target = distance_m(thr_a, nodes[tx_node].pos)
+        for eid, e in list(edges.items()):
+            if not eid.startswith("E_SPINE_A"):
+                continue
+            du = distance_m(thr_a, nodes[e.u].pos)
+            dv = distance_m(thr_a, nodes[e.v].pos)
+            if min(du, dv) <= target <= max(du, dv):
+                edges.pop(eid)
+                edge(f"{eid}_x", e.u, tx_node, ename="A", speed=22)
+                edge(f"{eid}_y", tx_node, e.v, ename="A", speed=22)
+                return
+
+    _splice_primary("TA_APS")
+    _splice_primary("TA_APN")
     edge("E_APS_LINK", "TA_APS", "AP_S", kind="taxilane", ename="S", width=25, speed=12)
     edge("E_APN_LINK", "TA_APN", "AP_N", kind="taxilane", ename="N", width=25, speed=12)
+
+    # Every OTHER runway needs its own way to the apron. Link the nearest node
+    # of its spine to the nearest apron entry; where that link has to cross a
+    # runway, mark_runway_crossings() will flag it and the aircraft will have
+    # to hold for clearance rather than taxi across unannounced.
+    for ri, (rw_name, t1, t2, i1, i2) in enumerate(runway_specs):
+        if ri == 0:
+            continue
+        spine = spine_nodes_by_runway[rw_name]
+        for apron_entry in ("TA_APS", "TA_APN"):
+            anchor = nodes[apron_entry].pos
+            nearest = min(spine, key=lambda n: distance_m(nodes[n].pos, anchor))
+            link_id = f"E_XLINK_{rw_name.replace('/', '_')}_{apron_entry}"
+            if not any((e.u, e.v) in ((nearest, apron_entry), (apron_entry, nearest))
+                       for e in edges.values()):
+                edge(link_id, nearest, apron_entry, ename=f"L{ri}", speed=20)
 
     # Match stand size to the fleet actually operating here: an airport whose
     # mix includes wide-bodies needs some stands built to take them, or every
@@ -232,7 +297,7 @@ def build_airport(
         ))
 
     nodes, edges = merge_close_nodes(nodes, edges)
-    return AirportLayout(
+    layout = AirportLayout(
         icao=icao, iata=iata, name=name, city=city, slug=slug,
         arp=rw(length / 2, 0.0), elevation_m=elevation_m, timezone=timezone,
         runways=runways, nodes=nodes, edges=edges, stands=stands, buildings=buildings,
@@ -243,3 +308,4 @@ def build_airport(
         default_wind_kt=default_wind_kt,
         notes=notes,
     )
+    return mark_runway_crossings(layout)
