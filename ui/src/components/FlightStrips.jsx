@@ -1,3 +1,4 @@
+import { memo } from "react";
 /**
  * FlightStrips - the scrolling telemetry list: callsign, type, status,
  * current clearance, and why an aircraft is holding, if it is. This is the
@@ -14,7 +15,7 @@ const STATUS_LABEL = {
   parked: "PARKED", diverted: "DIVERTED",
 };
 
-export default function FlightStrips({ flights }) {
+function FlightStrips({ flights }) {
   const active = (flights || [])
     .filter((f) => f.status !== "parked")
     .sort((a, b) => (a.status === "hold_short") - (b.status === "hold_short"));
@@ -46,3 +47,9 @@ export default function FlightStrips({ flights }) {
     </div>
   );
 }
+
+
+// Memoised: these panels are fed a throttled frame (see App.jsx), so
+// skipping re-render when their props are identical keeps DOM work off the
+// hot path entirely.
+export default memo(FlightStrips);

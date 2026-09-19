@@ -114,7 +114,7 @@ export function buildAirfieldLayers(layout, opts = {}) {
       getFillColor: (d) => [...d.color, 255],
       extruded: true,
       wireframe: false,
-      pickable: true,
+      pickable: false,
     })
   );
 
@@ -134,19 +134,56 @@ export function buildAirfieldLayers(layout, opts = {}) {
     );
   }
 
-  // --- Labels: runway designators, stand names ----------------------------
+  // --- Runway designators: paint, not labels ------------------------------
+  // The numerals at each threshold are painted ON the runway, so they are
+  // drawn ground-aligned, sized in metres, and rotated to the runway heading.
+  // Drawing them as billboarded pixel-text (what this used to do) meant they
+  // stayed a fixed screen size and always faced the camera - which is why
+  // they looked wrong and got clipped at the edges of their glyph cells
+  // instead of lying flat on the asphalt like real markings.
+  const designators = (v.labels || []).filter((d) => d.kind === "designator");
+  const otherLabels = (v.labels || []).filter((d) => d.kind !== "designator");
+
+  const TEXT_FONT = {
+    fontFamily: "monospace",
+    fontWeight: "bold",
+    // SDF glyphs stay crisp at any scale; the generous buffer stops the
+    // thick bold strokes touching the edge of their atlas cell.
+    fontSettings: { sdf: true, fontSize: 64, buffer: 12, radius: 12 },
+    characterSet: "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz -/.",
+  };
+
+  layers.push(
+    new TextLayer({
+      id: "runway-designators",
+      data: designators,
+      getPosition: (d) => d.position,
+      getText: (d) => d.text,
+      // Real runway numerals are about 20 m tall.
+      getSize: 20,
+      sizeUnits: "meters",
+      sizeMinPixels: 8,
+      // deck.gl measures angle counter-clockwise from east; the server sends a
+      // compass heading, and the numerals read UP the runway.
+      getAngle: (d) => 90 - (d.angle || 0),
+      getColor: [255, 255, 255, 235],
+      billboard: false,
+      ...TEXT_FONT,
+      pickable: false,
+    })
+  );
+
+  // --- Other labels: stand names, which should stay readable -------------
   layers.push(
     new TextLayer({
       id: "labels",
-      data: v.labels || [],
+      data: otherLabels,
       getPosition: (d) => d.position,
       getText: (d) => d.text,
       getSize: (d) => d.size || 12,
-      getAngle: (d) => 0,
-      getColor: [255, 255, 255, 230],
-      fontFamily: "monospace",
-      fontWeight: "bold",
+      getColor: [255, 255, 255, 220],
       billboard: true,
+      ...TEXT_FONT,
       pickable: false,
     })
   );

@@ -1,5 +1,6 @@
+import { memo } from "react";
 /** WeatherOverlay - small top-right readout of the live weather driving ATC minima. */
-export default function WeatherOverlay({ weather, windAssessment, activeEnd }) {
+function WeatherOverlay({ weather, windAssessment, activeEnd }) {
   if (!weather) return null;
   const w = windAssessment?.[activeEnd];
   return (
@@ -20,3 +21,9 @@ export default function WeatherOverlay({ weather, windAssessment, activeEnd }) {
     </div>
   );
 }
+
+
+// Memoised: these panels are fed a throttled frame (see App.jsx), so
+// skipping re-render when their props are identical keeps DOM work off the
+// hot path entirely.
+export default memo(WeatherOverlay);

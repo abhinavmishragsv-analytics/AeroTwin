@@ -160,18 +160,65 @@ class AirportTwin:
 
 
 class TwinRegistry:
+    """Twins keyed by airport AND session.
+
+    A page load is its own simulation, starting at T+0. Sharing one long-lived
+    twin per airport meant a reload dropped you into a simulation that had
+    been running for hours - the clock read T+40000s and the apron was already
+    mid-turnaround, which is not what "open the page" should look like.
+
+    A session keeps its twin for as long as the page lives, including while
+    the tab is in the background: the simulation runs server-side, so hidden
+    tabs and throttled browser timers do not pause it, and coming back shows
+    the airport where it actually got to rather than where it was left.
+
+    Abandoned twins are swept after a grace period, so a reload does not leak
+    a simulation per page load, and a brief network blip does not destroy one.
+    """
+
+    GRACE_S = 90.0
+
     def __init__(self):
         self._twins: dict[str, AirportTwin] = {}
+        self._empty_since: dict[str, float] = {}
 
-    async def get(self, icao: str) -> AirportTwin:
-        icao = icao.upper()
-        if icao not in self._twins:
-            self._twins[icao] = AirportTwin(icao)
-            await self._twins[icao].start()
-        return self._twins[icao]
+    @staticmethod
+    def _key(icao: str, session: str | None) -> str:
+        return f"{icao.upper()}:{session}" if session else icao.upper()
 
-    def peek(self, icao: str):
-        return self._twins.get(icao.upper())
+    async def get(self, icao: str, session: str | None = None) -> AirportTwin:
+        key = self._key(icao, session)
+        if key not in self._twins:
+            self._twins[key] = AirportTwin(icao.upper())
+            await self._twins[key].start()
+        self._empty_since.pop(key, None)
+        return self._twins[key]
+
+    def note_disconnect(self, icao: str, session: str | None):
+        key = self._key(icao, session)
+        twin = self._twins.get(key)
+        if twin is not None and not twin.clients:
+            self._empty_since[key] = time.monotonic()
+
+    async def sweep(self):
+        """Stop and drop twins whose last client left more than GRACE_S ago."""
+        now = time.monotonic()
+        for key, since in list(self._empty_since.items()):
+            twin = self._twins.get(key)
+            if twin is None:
+                self._empty_since.pop(key, None)
+                continue
+            if twin.clients:
+                self._empty_since.pop(key, None)
+                continue
+            if now - since >= self.GRACE_S:
+                await twin.stop()
+                self._twins.pop(key, None)
+                self._empty_since.pop(key, None)
+                logger.info("AeroTwin: swept idle twin %s", key)
+
+    def peek(self, icao: str, session: str | None = None):
+        return self._twins.get(self._key(icao, session))
 
     def live(self):
         return {k: len(v.clients) for k, v in self._twins.items()}
@@ -180,10 +227,20 @@ class TwinRegistry:
 twins = TwinRegistry()
 
 
+async def _sweeper():
+    while True:
+        await asyncio.sleep(30)
+        try:
+            await twins.sweep()
+        except Exception:  # noqa: BLE001
+            logger.exception("twin sweep failed")
+
+
 @app.on_event("startup")
 async def _startup():
     # The default airport is always warm, so the first page load is instant.
     await twins.get(airports.DEFAULT_ICAO)
+    asyncio.create_task(_sweeper())
 
 
 # ---------------------------------------------------------------------------
@@ -223,12 +280,12 @@ async def airport_layout(identifier: str):
 
 
 @app.get("/api/airports/{identifier}/status")
-async def airport_status(identifier: str):
+async def airport_status(identifier: str, session: str | None = None):
     try:
         icao = airports.resolve(identifier)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"unknown airport {identifier!r}")
-    twin = await twins.get(icao)
+    twin = await twins.get(icao, session)
     return twin.sim.status_snapshot()
 
 
@@ -263,6 +320,10 @@ class DisruptionRequest(BaseModel):
     duration_minutes: float = 15.0
     label: str | None = None
     target: str | None = None       # e.g. taxiway name for taxiway_closure
+    # Which page's simulation to mutate. Twins are per-session (see
+    # TwinRegistry), so without this a disruption would land on a different
+    # simulation than the one the person is looking at.
+    session: str | None = None
 
 
 @app.post("/api/airports/{identifier}/disrupt")
@@ -278,7 +339,7 @@ async def disrupt(identifier: str, req: DisruptionRequest):
             status_code=400,
             detail=f"duration_minutes must be between 0 and {DISRUPTION_MAX_MINUTES}",
         )
-    twin = await twins.get(icao)
+    twin = await twins.get(icao, req.session)
     entry = twin.sim.inject_disruption(req.type, req.duration_minutes, req.label, req.target)
     return {"ok": True, "disruption": entry, "twin": twin.sim.status_snapshot()}
 
@@ -292,8 +353,8 @@ async def disrupt_default(req: DisruptionRequest):
 # ---------------------------------------------------------------------------
 # Live stream
 # ---------------------------------------------------------------------------
-async def _stream(websocket: WebSocket, icao: str):
-    twin = await twins.get(icao)
+async def _stream(websocket: WebSocket, icao: str, session: str | None = None):
+    twin = await twins.get(icao, session)
     await websocket.accept()
     twin.clients.add(websocket)
     try:
@@ -312,18 +373,19 @@ async def _stream(websocket: WebSocket, icao: str):
         logger.info("%s client disconnected: %s", icao, exc)
     finally:
         twin.clients.discard(websocket)
+        twins.note_disconnect(icao, session)
 
 
 @app.websocket("/ws/twin/{identifier}")
-async def twin_stream(websocket: WebSocket, identifier: str):
+async def twin_stream(websocket: WebSocket, identifier: str, session: str | None = None):
     try:
         icao = airports.resolve(identifier)
     except KeyError:
         await websocket.close(code=4004)
         return
-    await _stream(websocket, icao)
+    await _stream(websocket, icao, session)
 
 
 @app.websocket("/ws/twin")
-async def twin_stream_default(websocket: WebSocket):
-    await _stream(websocket, airports.DEFAULT_ICAO)
+async def twin_stream_default(websocket: WebSocket, session: str | None = None):
+    await _stream(websocket, airports.DEFAULT_ICAO, session)

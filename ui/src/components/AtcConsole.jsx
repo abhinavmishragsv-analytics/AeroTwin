@@ -1,3 +1,4 @@
+import { memo } from "react";
 /**
  * AtcConsole - the write side of the bi-directional twin. Each button posts
  * a disruption to POST /api/airports/{icao}/disrupt and the live simulation
@@ -15,7 +16,7 @@ const ACTIONS = [
   { type: "emergency_arrival", label: "Emergency Arrival", minutes: 0, icon: "🚨" },
 ];
 
-export default function AtcConsole({ onDisrupt, disruptions }) {
+function AtcConsole({ onDisrupt, disruptions }) {
   return (
     <div className="panel console">
       <div className="panel-title warn">⚠ ATC DISRUPTION CONSOLE</div>
@@ -46,3 +47,9 @@ export default function AtcConsole({ onDisrupt, disruptions }) {
     </div>
   );
 }
+
+
+// Memoised: these panels are fed a throttled frame (see App.jsx), so
+// skipping re-render when their props are identical keeps DOM work off the
+// hot path entirely.
+export default memo(AtcConsole);

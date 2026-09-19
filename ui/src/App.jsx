@@ -64,6 +64,14 @@ export default function App() {
   const [identifier] = useState(slugFromPath() || "vabo");
   const [layout, setLayout] = useState(null);
   const [frame, setFrame] = useState(null);
+  // A second, deliberately slower copy of the frame for the DOM panels.
+  // Traffic frames arrive at STREAM_HZ (15/s). The map layers genuinely need
+  // that rate to move smoothly, but re-rendering the HUD and the flight-strip
+  // list fifteen times a second rebuilds a few hundred DOM nodes per second
+  // for text that a person cannot read that fast - it was the largest
+  // non-WebGL cost in the frame. The panels update ~4x a second instead.
+  const [uiFrame, setUiFrame] = useState(null);
+  const lastUiUpdate = useRef(0);
   const [connected, setConnected] = useState(false);
   const [camera, setCamera] = useState("orbit");
   const [viewState, setViewState] = useState(FALLBACK_VIEW_STATE);
@@ -99,6 +107,11 @@ export default function App() {
         setViewState({ ...airportViewState(msg.layout), transitionDuration: 1200 });
       } else {
         setFrame(msg);
+        const now = performance.now();
+        if (now - lastUiUpdate.current > 250) {
+          lastUiUpdate.current = now;
+          setUiFrame(msg);
+        }
       }
     };
 
@@ -145,12 +158,24 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [camera, frame]);
 
-  const layers = useMemo(() => {
-    if (!layout) return [];
-    return [...buildAirfieldLayers(layout), ...buildAircraftLayers(flights)];
-  }, [layout, flights]);
+  // The airfield is static for the whole session - pavement, paint, lights,
+  // hold bars, buildings - so it is memoised on `layout` ALONE. It used to
+  // share a useMemo with the aircraft, which meant several hundred light
+  // positions, a hundred-odd paint polygons and every building were
+  // reconstructed on every traffic frame, fifteen times a second, purely
+  // because one aircraft had moved a few metres. Splitting the two is the
+  // single biggest frame-time win available here.
+  const airfieldLayers = useMemo(
+    () => (layout ? buildAirfieldLayers(layout) : []),
+    [layout]
+  );
+  const aircraftLayers = useMemo(() => buildAircraftLayers(flights), [flights]);
+  const layers = useMemo(
+    () => [...airfieldLayers, ...aircraftLayers],
+    [airfieldLayers, aircraftLayers]
+  );
 
-  const twin = frame?.twin;
+  const twin = uiFrame?.twin;
 
   return (
     <div className="app-root">
@@ -168,9 +193,9 @@ export default function App() {
           airportName={layout?.name}
           icao={layout?.icao || identifier.toUpperCase()}
           connected={connected}
-          frame={frame}
+          frame={uiFrame}
         />
-        <FlightStrips flights={flights} />
+        <FlightStrips flights={uiFrame?.flights || []} />
       </div>
 
       <div className="overlay top-right">

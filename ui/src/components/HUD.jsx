@@ -1,8 +1,9 @@
+import { memo } from "react";
 /**
  * HUD - top-left status card: airport identity, sim clock, runway state,
  * weather, queue depth. Pure display; all values come from the twin frame.
  */
-export default function HUD({ airportName, icao, connected, frame }) {
+function HUD({ airportName, icao, connected, frame }) {
   const twin = frame?.twin;
   const rwy = twin?.runway;
   return (
@@ -57,3 +58,9 @@ function Metric({ label, value, tone }) {
     </div>
   );
 }
+
+
+// Memoised: these panels are fed a throttled frame (see App.jsx), so
+// skipping re-render when their props are identical keeps DOM work off the
+// hot path entirely.
+export default memo(HUD);
