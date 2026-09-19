@@ -299,6 +299,11 @@ def build_visuals(layout):
         "id": b.id,
         "name": b.name,
         "polygon": rect_polygon(b.center, b.width_m, b.depth_m, b.rotation_deg),
+        # The ground position of the building's centre, for anything that
+        # needs to aim at or stand near a building rather than draw it - the
+        # tower-cab camera view in particular. build_visuals's other consumers
+        # only ever needed the polygon, but a camera needs a point.
+        "position": [b.center[1], b.center[0]],
         "height": b.height_m,
         "kind": b.kind,
         "color": list(b.color),

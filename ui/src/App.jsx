@@ -13,7 +13,7 @@ import DeckGL from "@deck.gl/react";
 import { Map as MapLibreMap } from "react-map-gl/maplibre";
 import "maplibre-gl/dist/maplibre-gl.css";
 
-import { airportViewState, buildAirfieldLayers } from "./lib/airfieldLayers";
+import { airportViewState, buildAirfieldLayers, towerViewState } from "./lib/airfieldLayers";
 import { buildAircraftLayers } from "./lib/aircraftLayers";
 import { fetchAirports, postDisruption, slugFromPath, twinSocketUrl } from "./lib/api";
 
@@ -117,13 +117,14 @@ export default function App() {
 
   useEffect(() => {
     if (!layout || camera === "chase") return;
-    const base = airportViewState(layout);
     if (camera === "orbit") {
-      setViewState({ ...base, pitch: 55, zoom: 15.4, transitionDuration: 800 });
+      setViewState({ ...airportViewState(layout), pitch: 55, zoom: 15.4, transitionDuration: 800 });
     } else if (camera === "tower") {
-      setViewState({ ...base, pitch: 70, zoom: 17.2, transitionDuration: 800 });
+      // A real vantage point (the ATC tower's own coordinates) looking out
+      // toward the runway - not the airport centre pitched down further.
+      setViewState({ ...towerViewState(layout), transitionDuration: 800 });
     } else if (camera === "runway") {
-      setViewState({ ...base, pitch: 78, zoom: 17.8, transitionDuration: 800 });
+      setViewState({ ...airportViewState(layout), pitch: 78, zoom: 17.8, transitionDuration: 800 });
     }
   }, [camera, layout]);
 

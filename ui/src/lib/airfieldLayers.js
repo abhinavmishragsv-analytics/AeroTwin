@@ -186,3 +186,51 @@ export function airportViewState(layout) {
     bearing: layout.runways?.[0]?.ends?.[0]?.heading_deg ?? 0,
   };
 }
+
+// --- small client-side geodesy, just enough for camera aiming ------------
+// Mirrors the relevant bits of core/geo.py. Kept minimal on purpose - this is
+// for pointing a camera, not for anything the simulation depends on.
+function bearingDeg([lng1, lat1], [lng2, lat2]) {
+  const toRad = (d) => (d * Math.PI) / 180;
+  const dLng = toRad(lng2 - lng1);
+  const y = Math.sin(dLng) * Math.cos(toRad(lat2));
+  const x =
+    Math.cos(toRad(lat1)) * Math.sin(toRad(lat2)) -
+    Math.sin(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.cos(dLng);
+  return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
+}
+
+/**
+ * Tower-cab camera: positioned AT the airport's control tower, looking out
+ * toward the field - not just "zoomed in on the runway" (what this used to
+ * do). The camera target is the tower's own ground position (from the
+ * `position` field geometry.py now sends on every building), the bearing is
+ * computed to face the runway, and the pitch is steep enough to feel like
+ * looking down from height rather than the top-down orbit view.
+ *
+ * MapView's camera always looks AT its target from a distance implied by
+ * zoom, so this can't place the eye at an exact metre altitude the way a
+ * dedicated FirstPersonView could - doing that would mean dropping the
+ * MapLibre satellite basemap, since react-map-gl only syncs to a standard
+ * Web Mercator view. What this gets right, and what actually mattered: a
+ * real vantage point (the tower's coordinates, not the airport centre) and a
+ * real look-at direction (out across the runway, not down at it).
+ */
+export function towerViewState(layout) {
+  if (!layout) return airportViewState(layout);
+  const tower = (layout.buildings || []).find((b) => b.kind === "tower");
+  const rwy = layout.runways?.[0];
+  if (!tower || !rwy) return { ...airportViewState(layout), pitch: 75, zoom: 17.2 };
+
+  const towerPos = tower.position; // [lng, lat]
+  const aimAt = rwy.ends[0].threshold; // [lng, lat] - look out toward the runway
+  const bearing = bearingDeg(towerPos, aimAt);
+
+  return {
+    longitude: towerPos[0],
+    latitude: towerPos[1],
+    zoom: 17.6,
+    pitch: 80,
+    bearing,
+  };
+}

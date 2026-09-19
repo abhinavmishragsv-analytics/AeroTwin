@@ -1,86 +1,85 @@
 /**
  * Aircraft Layer
  * ==============
- * Renders the live `flights` array from a traffic frame. Each aircraft is a
- * simple triangular glyph sized by `model_scale` (from core/aircraft.py) and
- * coloured by status, oriented by heading - deliberately lightweight rather
- * than a GLB model, since the previous build's biggest cost was 540 draw
- * calls for a single mesh; this keeps every frame cheap at any traffic level.
+ * Renders the live `flights` array using the repo's real aircraft.glb - the
+ * same optimized model (17 draw calls, 2.9 MB, PBR materials, Z-up corrected)
+ * that shipped in the original build - via deck.gl's ScenegraphLayer, not a
+ * flat billboard icon. This is a 3D digital twin: aircraft are meshes with
+ * pitch/roll/heading and altitude, not sprites.
+ *
+ * Orientation formula and sizeScale are carried over unchanged from the
+ * original App.jsx (git history: 92e8316, 4d799e2, 9b113df) - that's tuned,
+ * hard-won knowledge (the axis-convention fix and the 540-draw-call
+ * optimization pass both live in the .glb itself and in this orientation
+ * mapping), not something to rederive from scratch.
  */
-import { IconLayer, TextLayer } from "@deck.gl/layers";
+import { ScenegraphLayer } from "@deck.gl/mesh-layers";
+import { TextLayer } from "@deck.gl/layers";
 
-const STATUS_COLOR = {
-  parked: [110, 118, 130],
-  scheduled: [110, 118, 130],
-  pushback: [200, 170, 90],
-  taxi_out: [90, 200, 140],
-  hold_short: [230, 90, 70],
-  lineup: [255, 140, 60],
-  takeoff_roll: [255, 200, 60],
-  climb: [110, 190, 255],
-  inbound: [110, 190, 255],
-  approach: [110, 190, 255],
-  holding: [200, 130, 255],
-  go_around: [255, 90, 200],
-  final: [255, 214, 90],
-  landing_rollout: [255, 214, 90],
-  runway_vacate: [120, 220, 160],
-  taxi_in: [90, 200, 140],
-  turnaround: [110, 118, 130],
-  diverted: [255, 60, 60],
+const STATUS_TINT = {
+  hold_short: [255, 210, 160],
+  lineup: [255, 190, 130],
+  takeoff_roll: [255, 230, 150],
+  go_around: [255, 170, 220],
+  final: [255, 235, 180],
+  diverted: [255, 130, 130],
 };
 
-// A minimal plane glyph as an inline SVG data URI - no external asset fetch,
-// no GLB parse cost, and it scales trivially with model_scale.
-//
-// width/height are required here, not just viewBox: deck.gl's IconLayer loads
-// this through createImageBitmap(), and a browser refuses to rasterize an SVG
-// that has no explicit natural dimensions - viewBox alone doesn't count. Without
-// them this throws ("SVG image without natural dimensions") and no aircraft
-// render at all.
-const PLANE_ICON =
-  "data:image/svg+xml;base64," +
-  btoa(
-    `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
-      <path d="M32 2 L38 24 L60 34 L60 40 L38 34 L38 46 L48 54 L48 59 L32 55 L16 59 L16 54 L26 46 L26 34 L4 40 L4 34 L26 24 Z"
-            fill="white"/>
-    </svg>`
-  );
+// Position/orientation transitions are tuned to the backend's broadcast rate
+// (core/config.py STREAM_HZ, default 15 Hz) in milliseconds, so the client is
+// never interpolating across a gap wider than one real update - faster than
+// that and motion stutters between frames, slower and it lags visibly behind.
+// Hardcoded rather than fetched: it's a rendering constant, not live state,
+// and matches the server default (override AEROTWIN_STREAM_HZ on both ends
+// together if you ever change it).
+const STREAM_HZ = 15.0;
+const FRAME_MS = Math.round(1000 / STREAM_HZ);
 
 export function buildAircraftLayers(flights, opts = {}) {
   const showLabels = opts.showLabels !== false;
   const data = flights || [];
 
-  const icons = new IconLayer({
-    id: "aircraft-icons",
-    data,
-    getPosition: (d) => [d.lng, d.lat, d.altitude || 0],
-    getIcon: () => ({ url: PLANE_ICON, width: 64, height: 64, anchorX: 32, anchorY: 32 }),
-    getSize: (d) => 16 * (d.model_scale || 1.0) * (d.on_ground === false ? 1.15 : 1.0),
-    sizeUnits: "pixels",
-    getAngle: (d) => 90 - (d.heading || 0),
-    getColor: (d) => STATUS_COLOR[d.status] || [255, 255, 255],
-    pickable: true,
-    updateTriggers: {
-      getPosition: data,
-      getAngle: data,
-      getColor: data,
-      getSize: data,
-    },
-  });
-
-  const layers = [icons];
+  const layers = [
+    new ScenegraphLayer({
+      id: "aircraft-3d-model",
+      data,
+      scenegraph: "/aircraft.glb",
+      getPosition: (d) => [d.lng, d.lat, d.altitude || 0],
+      // pitch/roll come straight from the simulation's kinematic model
+      // (core/twin_sim.py _traverse); heading is compass bearing, converted
+      // to the model's own forward axis with the -heading+90 term.
+      getOrientation: (d) => [d.pitch || 0, -(d.heading || 0) + 90, d.roll || 0],
+      getScale: (d) => {
+        const s = (d.model_scale || 1.0) * 28;
+        return [s, s, s];
+      },
+      getColor: (d) => [...(STATUS_TINT[d.status] || [255, 255, 255]), 255],
+      sizeScale: 1,
+      _lighting: "pbr",
+      pickable: true,
+      transitions: {
+        getPosition: FRAME_MS * 3,
+        getOrientation: FRAME_MS * 3,
+      },
+      updateTriggers: {
+        getPosition: data,
+        getOrientation: data,
+        getScale: data,
+        getColor: data,
+      },
+    }),
+  ];
 
   if (showLabels) {
     layers.push(
       new TextLayer({
         id: "aircraft-labels",
         data,
-        getPosition: (d) => [d.lng, d.lat, (d.altitude || 0) + 8],
+        getPosition: (d) => [d.lng, d.lat, (d.altitude || 0) + 10],
         getText: (d) => d.id,
         getSize: 10,
         getColor: [230, 236, 245, 220],
-        getPixelOffset: [0, -16],
+        getPixelOffset: [0, -18],
         fontFamily: "monospace",
         billboard: true,
         pickable: false,
@@ -91,5 +90,3 @@ export function buildAircraftLayers(flights, opts = {}) {
 
   return layers;
 }
-
-export { STATUS_COLOR };
