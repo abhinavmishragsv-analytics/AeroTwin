@@ -39,6 +39,18 @@ taxiway.
   (`ws://.../ws/twin/{icao-or-slug}`), created lazily on first connection.
   `/vadodara`, `/delhi`, `/mumbai`, `/ahmedabad`, `/pune`, `/surat` are all the
   same code running different data.
+- **Multi-runway operations.** Every runway has its own parallel taxiway,
+  holding points, runway entries and rapid exits, and its own connections to
+  the apron - Delhi's three and Mumbai's two are flown, not painted. Traffic
+  is allocated across runways by wind, length and queue depth. Runways whose
+  centrelines physically intersect (Mumbai's 09/27 and 14/32) share one
+  occupancy resource and are sequenced as a single runway. Where a taxiway
+  crosses a runway to reach the apron, the aircraft holds short and takes
+  that runway's clearance before crossing.
+- **A page load is its own simulation.** Twins are keyed by airport and by a
+  session id generated per page load, so a reload starts a fresh airport at
+  T+0 rather than joining one that has been running for hours. The simulation
+  runs server-side, so backgrounding the tab does not pause it.
 - **ML model integration.** `core/models.py` loads whatever `.pkl` artifacts
   exist in `core/models/` (macro delay forecast, taxi-time regression,
   congestion-tier clustering, network criticality, weather ground-stop
@@ -61,7 +73,13 @@ inter-aircraft distances every frame:
 ```bash
 python scripts/soak_test.py            # all six airports, 60 sim-minutes each
 python scripts/soak_test.py VABO 180   # one airport, 3 sim-hours
+python scripts/soak_test.py --leak-check   # 10 sim-hours, throughput over time
 ```
+
+`--leak-check` exists because the 60-minute run could not see a slow
+resource leak: throughput looks healthy right up until whatever is being
+leaked (a stand, a taxiway lock) runs out. It compares movements in the first
+third of a long run against the last third.
 
 A `PASS` means zero ground separation violations (55 m standard), zero
 airborne separation violations (300 m / 120 ft standard), and zero runway
@@ -118,8 +136,7 @@ Open `http://localhost:5173/` for Vadodara, or `http://localhost:5173/delhi`,
 server's SPA fallback means any of these paths load the same app; `App.jsx`
 reads the path once on load to pick the airport.
 
-Set `AEROTWIN_TIME_COMPRESSION` (default `16.0` - a fast-paced twin, four
-simulated seconds per wall second) to change how many simulated
+Set `AEROTWIN_TIME_COMPRESSION` (default `36.0`) to change how many simulated
 seconds pass per wall-clock second; `1.0` runs in real time.
 
 ## What's real vs representative
