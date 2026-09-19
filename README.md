@@ -118,7 +118,8 @@ Open `http://localhost:5173/` for Vadodara, or `http://localhost:5173/delhi`,
 server's SPA fallback means any of these paths load the same app; `App.jsx`
 reads the path once on load to pick the airport.
 
-Set `AEROTWIN_TIME_COMPRESSION` (default `4.0`) to change how many simulated
+Set `AEROTWIN_TIME_COMPRESSION` (default `16.0` - a fast-paced twin, four
+simulated seconds per wall second) to change how many simulated
 seconds pass per wall-clock second; `1.0` runs in real time.
 
 ## What's real vs representative

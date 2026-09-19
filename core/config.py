@@ -13,8 +13,11 @@ a 35 minute turnaround, 90 seconds of wake separation, a 70 second taxi at 15
 knots - is the real number, not a made-up one scaled to look good. Compression
 happens in exactly one place: the server advances the clock `TIME_COMPRESSION`
 seconds per wall-clock second. Set it to 1 and the twin runs in real time; the
-default of 4 keeps an airport with ten movements an hour visibly busy without
-distorting any of the physics.
+default of 16 (4x the original 4.0) keeps a fast-paced twin - aircraft cover
+real ground at four times the wall-clock rate - without distorting any of the
+physics: every lock, separation check and wake-turbulence timer downstream
+still operates in simulated seconds, which this knob never touches. Only
+`asyncio.sleep(period)` in core/main.py's broadcast loop cares about wall time.
 """
 import os
 
@@ -35,7 +38,7 @@ MODEL_FILES = {
 # ---------------------------------------------------------------------------
 # Time
 # ---------------------------------------------------------------------------
-TIME_COMPRESSION = float(os.getenv("AEROTWIN_TIME_COMPRESSION", "4.0"))
+TIME_COMPRESSION = float(os.getenv("AEROTWIN_TIME_COMPRESSION", "16.0"))
 STREAM_HZ = float(os.getenv("AEROTWIN_STREAM_HZ", "15.0"))   # WebSocket frames/sec
 STEP_DT = 0.25              # simulation-seconds per motion integration step
 

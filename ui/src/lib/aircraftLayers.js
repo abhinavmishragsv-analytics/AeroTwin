@@ -35,6 +35,11 @@ const STATUS_TINT = {
 const STREAM_HZ = 15.0;
 const FRAME_MS = Math.round(1000 / STREAM_HZ);
 
+// A modest fuselage-length trim (see getScale below) - 1.0 would be the
+// model's true proportions; smaller shortens it. 0.88 reads as "slightly
+// shorter", not a visibly different aircraft.
+const FUSELAGE_LENGTH_FACTOR = 0.88;
+
 export function buildAircraftLayers(flights, opts = {}) {
   const showLabels = opts.showLabels !== false;
   const data = flights || [];
@@ -51,7 +56,14 @@ export function buildAircraftLayers(flights, opts = {}) {
       getOrientation: (d) => [d.pitch || 0, -(d.heading || 0) + 90, d.roll || 0],
       getScale: (d) => {
         const s = (d.model_scale || 1.0) * 28;
-        return [s, s, s];
+        // Non-uniform on purpose: the model's local axes are X=fuselage
+        // length, Y=wingspan, Z=height (measured and recorded when the GLB
+        // was optimized - see git history on this file's predecessor,
+        // commit 9b113df). Shortening only X trims the fuselage without
+        // also shrinking the wingspan or height, which a uniform scale
+        // would do. FUSELAGE_LENGTH_FACTOR is the one knob to touch if this
+        // needs to be shorter or longer still.
+        return [s * FUSELAGE_LENGTH_FACTOR, s, s];
       },
       getColor: (d) => [...(STATUS_TINT[d.status] || [255, 255, 255]), 255],
       sizeScale: 1,
