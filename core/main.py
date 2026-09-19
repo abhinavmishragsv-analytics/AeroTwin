@@ -117,21 +117,31 @@ class AirportTwin:
         so every duration inside the model stays a real-world number.
         """
         period = 1.0 / STREAM_HZ
+        next_tick = time.monotonic() + period
         last_reap = time.monotonic()
         while True:
             try:
                 self.env.run(until=self.env.now + period * TIME_COMPRESSION)
                 self.sim.monitor.audit(list(self.sim.flights.values()), self.env.now, self.sim.runway_ctl)
                 await self._broadcast()
-                if time.monotonic() - last_reap > 5.0:
+                now = time.monotonic()
+                if now - last_reap > 5.0:
                     self.sim.reap()
-                    last_reap = time.monotonic()
+                    last_reap = now
             except Exception:  # noqa: BLE001
                 # The twin must never die on one bad tick: an uncaught error
                 # here would freeze the airport for every connected client with
                 # no visible symptom beyond a stopped picture.
                 logger.exception("%s simulation tick failed; continuing", self.icao)
-            await asyncio.sleep(period)
+
+            now = time.monotonic()
+            delay = next_tick - now
+            if delay < 0:
+                next_tick = now + period
+                delay = 0.001
+            else:
+                next_tick += period
+            await asyncio.sleep(delay)
 
     def frame(self):
         visible = [f for f in self.sim.flights.values() if f["status"] != "despawned"]

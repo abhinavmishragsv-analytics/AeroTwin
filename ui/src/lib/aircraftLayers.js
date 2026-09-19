@@ -76,8 +76,7 @@ export function buildAircraftLayers(flights, opts = {}) {
       updateTriggers: {
         getPosition: data,
         getOrientation: data,
-        getScale: data,
-        getColor: [data, selectedId],
+        getColor: [selectedId, data.map((d) => d.status).join(",")],
       },
     }),
   ];

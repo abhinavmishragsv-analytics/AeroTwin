@@ -169,14 +169,16 @@ export default function App() {
           ? sampled.find((f) => f.id === selId)
           : sampled.find((f) => f.status !== "parked") || sampled[0];
         if (chaseTarget) {
-          setViewState({
+          const nextVs = {
             longitude: chaseTarget.lng,
             latitude: chaseTarget.lat,
             zoom: 17.6,
             pitch: 62,
             bearing: chaseTarget.heading,
             transitionDuration: 0,
-          });
+          };
+          viewStateRef.current = nextVs;
+          setViewState(nextVs);
         }
       }
 
