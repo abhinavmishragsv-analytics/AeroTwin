@@ -121,7 +121,7 @@ class AirportTwin:
         while True:
             try:
                 self.env.run(until=self.env.now + period * TIME_COMPRESSION)
-                self.sim.monitor.audit(list(self.sim.flights.values()), self.sim.runway_ctl)
+                self.sim.monitor.audit(list(self.sim.flights.values()), self.env.now, self.sim.runway_ctl)
                 await self._broadcast()
                 if time.monotonic() - last_reap > 5.0:
                     self.sim.reap()

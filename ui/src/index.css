@@ -82,3 +82,64 @@ body { font-family: "Inter", system-ui, sans-serif; color: #e6ecf5; }
 
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 3px; }
+
+/* --- Selected flight strip highlight -------------------------------- */
+.strip { cursor: pointer; transition: background 0.15s, border-color 0.15s; }
+.strip:hover { background: rgba(255,255,255,0.06); }
+.strip-selected { background: rgba(120,200,255,0.10); border-left-color: #78c8ff; }
+
+/* --- SEPARATION metric info tooltip / violations popover ------------- */
+.metric-separation { position: relative; }
+.metric-label .info-icon {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 13px; height: 13px; margin-left: 5px; border-radius: 999px;
+  background: rgba(255,255,255,0.12); color: #b8c2d4; border: none;
+  font-size: 9px; font-style: italic; font-weight: 700; line-height: 1;
+  cursor: pointer; padding: 0; vertical-align: middle;
+}
+.metric-label .info-icon:hover { background: rgba(77,163,255,0.35); color: #fff; }
+
+.violations-popover {
+  position: absolute; top: calc(100% + 8px); left: 0; z-index: 20;
+  width: 260px; max-width: 70vw;
+  background: rgba(12,16,24,0.97); border: 1px solid rgba(255,255,255,0.12);
+  border-radius: 10px; padding: 10px 12px; box-shadow: 0 12px 30px rgba(0,0,0,0.5);
+}
+.violations-popover-title { font-size: 11px; font-weight: 700; letter-spacing: 0.04em; opacity: 0.8; margin-bottom: 8px; }
+.violations-popover-list { max-height: 220px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+.violations-empty { font-size: 11px; opacity: 0.5; }
+.violation-row { background: rgba(255,255,255,0.04); border-radius: 6px; padding: 6px 8px; border-left: 2px solid rgba(250,82,82,0.5); }
+.violation-row-top { display: flex; justify-content: space-between; font-size: 10px; }
+.violation-kind { font-weight: 700; letter-spacing: 0.04em; }
+.violation-kind.ground { color: #fab005; }
+.violation-kind.airborne { color: #fa5252; }
+.violation-time { opacity: 0.55; }
+.violation-pair { font-size: 12px; font-weight: 600; margin-top: 3px; }
+.violation-distance { font-size: 10px; opacity: 0.65; margin-top: 2px; }
+
+/* --- Flight detail panel (tracks the selected aircraft on screen) ---- */
+.flight-detail-panel {
+  position: absolute; z-index: 15; width: 280px;
+  background: rgba(12,16,24,0.95); border: 1px solid rgba(120,200,255,0.35);
+  border-radius: 12px; padding: 12px 14px; backdrop-filter: blur(8px);
+  box-shadow: 0 12px 30px rgba(0,0,0,0.5);
+  pointer-events: auto;
+}
+.fdp-header { display: flex; align-items: flex-start; justify-content: space-between; }
+.fdp-flight-number { font-size: 15px; font-weight: 700; }
+.fdp-airline { font-size: 11px; opacity: 0.65; margin-top: 1px; }
+.fdp-close {
+  background: rgba(255,255,255,0.08); border: none; color: #e6ecf5;
+  width: 22px; height: 22px; border-radius: 999px; font-size: 14px; line-height: 1;
+  cursor: pointer; flex-shrink: 0;
+}
+.fdp-close:hover { background: rgba(255,255,255,0.18); }
+.fdp-route { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; margin-top: 8px; }
+.fdp-route-arrow { opacity: 0.5; }
+.fdp-status-badge {
+  display: inline-block; margin-top: 8px; font-size: 10px; font-weight: 700; letter-spacing: 0.03em;
+  background: rgba(77,163,255,0.18); color: #4da3ff; padding: 3px 9px; border-radius: 999px;
+}
+.fdp-grid { margin-top: 10px; display: grid; grid-template-columns: 1fr 1fr; gap: 7px 10px; }
+.fdp-row-label { font-size: 9px; letter-spacing: 0.05em; opacity: 0.55; text-transform: uppercase; display: block; }
+.fdp-row-value { font-size: 12px; font-weight: 600; display: block; margin-top: 1px; }

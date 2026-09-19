@@ -5,6 +5,9 @@ import { memo } from "react";
  * one place in the UI where the taxi/runway clearance text produced by
  * core.routing.TaxiRoute.describe() and the ATC state machine become visible
  * in plain language, not just position.
+ *
+ * Clicking a strip selects that flight - App.jsx then points the camera at
+ * it and opens the tracking detail panel (see FlightDetailPanel.jsx).
  */
 const STATUS_LABEL = {
   scheduled: "SCHEDULED", pushback: "PUSHBACK", taxi_out: "TAXI OUT",
@@ -15,7 +18,7 @@ const STATUS_LABEL = {
   parked: "PARKED", diverted: "DIVERTED",
 };
 
-function FlightStrips({ flights }) {
+function FlightStrips({ flights, selectedId, onSelect }) {
   const active = (flights || [])
     .filter((f) => f.status !== "parked")
     .sort((a, b) => (a.status === "hold_short") - (b.status === "hold_short"));
@@ -26,7 +29,11 @@ function FlightStrips({ flights }) {
       <div className="strips-list">
         {active.length === 0 && <div className="strips-empty">No active movements</div>}
         {active.map((f) => (
-          <div key={f.id} className="strip">
+          <div
+            key={f.id}
+            className={`strip ${f.id === selectedId ? "strip-selected" : ""}`}
+            onClick={() => onSelect && onSelect(f.id === selectedId ? null : f.id)}
+          >
             <div className="strip-row1">
               <span className="callsign">{f.id}</span>
               <span className="strip-badge">{STATUS_LABEL[f.status] || f.status}</span>

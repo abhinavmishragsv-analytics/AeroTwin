@@ -59,6 +59,10 @@ LVP_TRIGGER_VISIBILITY_M = 1500
 MIN_GROUND_SEPARATION_M = 55.0
 MIN_AIRBORNE_SEPARATION_M = 300.0
 
+# How many separation-violation incidents the monitor keeps (most recent
+# first) for the UI's violation log - same idea as DISRUPTION_LOG_LIMIT.
+VIOLATION_LOG_LIMIT = 40
+
 # States in which an aircraft is stationary on a stand and therefore outside
 # the separation audit entirely.
 PARKED_STATUSES = {"parked", "scheduled", "turnaround", "despawned", "diverted"}
@@ -435,8 +439,15 @@ class SeparationMonitor:
         self.min_airborne_m = float("inf")
         self.runway_incursions = 0
         self.worst_pair = None
+        # Incident log for the UI's separation-violations detail panel, most
+        # recent first. One entry is appended per PAIR when it first crosses
+        # under minimum separation, not once per audit tick - two aircraft
+        # sitting close together for several seconds would otherwise flood
+        # this with duplicates of the same incident.
+        self.log = []
+        self._active_pairs = set()
 
-    def audit(self, flights, runway_controller=None):
+    def audit(self, flights, sim_time=None, runway_controller=None):
         ground, air = [], []
         for f in flights:
             # Aircraft on stand are not a separation problem - stands are
@@ -445,6 +456,8 @@ class SeparationMonitor:
                 continue
             (ground if (f.get("altitude") or 0) < 5 else air).append(f)
 
+        current_pairs = set()
+
         for a, b in itertools.combinations(ground, 2):
             d = distance_m((a["lat"], a["lng"]), (b["lat"], b["lng"]))
             if d < self.min_ground_m:
@@ -452,6 +465,10 @@ class SeparationMonitor:
                 self.worst_pair = (a["id"], b["id"], round(d, 1))
             if d < MIN_GROUND_SEPARATION_M:
                 self.ground_violations += 1
+                pair = tuple(sorted((a["id"], b["id"])))
+                current_pairs.add(pair)
+                if pair not in self._active_pairs:
+                    self._log_incident("ground", a, b, d, sim_time, MIN_GROUND_SEPARATION_M)
 
         for a, b in itertools.combinations(air, 2):
             d = distance_m((a["lat"], a["lng"]), (b["lat"], b["lng"]))
@@ -459,12 +476,34 @@ class SeparationMonitor:
             self.min_airborne_m = min(self.min_airborne_m, d)
             if d < MIN_AIRBORNE_SEPARATION_M and vertical < 120:
                 self.airborne_violations += 1
+                pair = tuple(sorted((a["id"], b["id"])))
+                current_pairs.add(pair)
+                if pair not in self._active_pairs:
+                    self._log_incident("airborne", a, b, d, sim_time, MIN_AIRBORNE_SEPARATION_M,
+                                        vertical_m=vertical)
+
+        self._active_pairs = current_pairs
 
         if runway_controller is not None:
             on_runway = [f for f in flights
                          if f.get("status") in ("lineup", "takeoff_roll", "landing_rollout", "touchdown")]
             if len(on_runway) > 1:
                 self.runway_incursions += 1
+
+    def _log_incident(self, kind, a, b, distance, sim_time, min_required_m, vertical_m=None):
+        entry = {
+            "kind": kind,
+            "time": round(sim_time, 1) if sim_time is not None else None,
+            "a": a["id"], "b": b["id"],
+            "a_type": a.get("type"), "b_type": b.get("type"),
+            "a_status": a.get("status"), "b_status": b.get("status"),
+            "distance_m": round(distance, 1),
+            "min_required_m": min_required_m,
+        }
+        if vertical_m is not None:
+            entry["vertical_m"] = round(vertical_m, 1)
+        self.log.insert(0, entry)
+        del self.log[VIOLATION_LOG_LIMIT:]
 
     def snapshot(self):
         return {
@@ -475,4 +514,6 @@ class SeparationMonitor:
             "closest_airborne_m": None if math.isinf(self.min_airborne_m) else round(self.min_airborne_m, 1),
             "closest_pair": self.worst_pair,
             "min_ground_standard_m": MIN_GROUND_SEPARATION_M,
+            "min_airborne_standard_m": MIN_AIRBORNE_SEPARATION_M,
+            "log": self.log,
         }
