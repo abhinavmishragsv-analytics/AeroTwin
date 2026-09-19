@@ -38,7 +38,7 @@ MODEL_FILES = {
 # ---------------------------------------------------------------------------
 # Time
 # ---------------------------------------------------------------------------
-TIME_COMPRESSION = float(os.getenv("AEROTWIN_TIME_COMPRESSION", "16.0"))
+TIME_COMPRESSION = float(os.getenv("AEROTWIN_TIME_COMPRESSION", "36.0"))
 STREAM_HZ = float(os.getenv("AEROTWIN_STREAM_HZ", "15.0"))   # WebSocket frames/sec
 STEP_DT = 0.25              # simulation-seconds per motion integration step
 
