@@ -84,7 +84,7 @@ def build_airport(
         "A1": 60.0,
         "A2": length * 0.30,
         "A3": length * 0.62,
-        "A4": length - 70.0,
+        "A4": length - 60.0,  # match A1's 60 m setback - see vabo.py for why the asymmetry matters
     }
     ordered = sorted(stations.items(), key=lambda kv: kv[1])
     for sname, along in ordered:

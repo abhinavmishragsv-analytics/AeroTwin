@@ -95,11 +95,15 @@ class AirportTwin:
                 want_arrival = self.sim.rng.random() < ARRIVAL_SHARE
                 if want_arrival and self.sim.accepts_arrival():
                     self.env.process(self.sim.operate_arrival())
-                else:
+                elif self.sim.accepts_departure():
                     # If approach control would not release another inbound
                     # (spacing, approach saturation, or no stand to park it on),
                     # the slot goes to a departure instead of manufacturing an
-                    # arrival that will only have to go around.
+                    # arrival that will only have to go around - but only if the
+                    # departure queue can actually absorb one. Otherwise the
+                    # slot is simply skipped: an aircraft that would sit on a
+                    # stand for an hour waiting to push back is not traffic,
+                    # it is just a stand taken out of service.
                     self.env.process(self.sim.operate_departure())
             except Exception:  # noqa: BLE001
                 logger.exception("traffic generator tick failed")

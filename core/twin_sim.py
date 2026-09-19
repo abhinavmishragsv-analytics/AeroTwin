@@ -163,6 +163,12 @@ class Aerodrome:
         # spacing. Offering arrivals faster than that just fills the approach
         # queue with aircraft that will time out and divert; a real approach
         # control unit would not release them in the first place.
+        # Spacing is driven by how long one aircraft owns the final approach
+        # corridor (_claim_final serialises it), which is roughly the descent
+        # from the final approach fix plus rollout and vacate. The old 260 s
+        # floor was tuned when arrivals frequently timed out and diverted; now
+        # that they reliably land, it throttled arrivals so hard that a busy
+        # airport ran ~5 departures per arrival and the approach looked empty.
         base = 110.0 if ac_type is None else fleet.arrival_separation_s(ac_type, ac_type) * 1.3
         gap = max(base, 260.0)
         if self.env.now - self._last_arrival_spawn_t < gap:
@@ -171,9 +177,42 @@ class Aerodrome:
                       if f["status"] in ("inbound", "approach", "final", "holding", "go_around"))
         if inbound >= 3:
             return False
-        if self.stands.free_stand(ac_type or fleet.get("A20N")) is None:
+        # Apron headroom, not just "is there one stand left". Accepting
+        # arrivals until the last stand is taken fills the apron to 100% and
+        # holds it there: every later arrival then has to hold or divert, and
+        # every departure is competing for taxiways with a parked-solid apron.
+        # Real aerodromes keep spare stands for turnarounds, towing and
+        # irregular operations, so the twin reserves a small margin too - the
+        # apron ends up busy but workable, which is both more realistic and
+        # far better to look at than a permanently full one.
+        want = ac_type or fleet.get("A20N")
+        if self.stands.free_stand(want) is None:
+            return False
+        total = len(self.stands.resources)
+        free = sum(1 for v in self.stands.occupant.values() if v is None)
+        reserve = max(1, int(total * 0.15))
+        if free <= reserve:
             return False
         return True
+
+    def accepts_departure(self):
+        """Whether to push another aircraft onto stand as a fresh departure.
+
+        Departures were generated on a fixed timer with no regard for whether
+        the runway could absorb them, so at a busy airport they simply
+        accumulated on stands: VIDP ended a 10-hour run with 29 aircraft
+        parked waiting to push back and exactly one actually taxiing, which
+        filled every stand and looked like an apron-capacity problem when it
+        was really an unmetered-queue problem. A departure that cannot get
+        airborne for an hour should never have been given a stand in the
+        first place.
+        """
+        waiting = sum(1 for f in self.flights.values()
+                      if f["direction"] == "DEP"
+                      and f["status"] in ("scheduled", "pushback", "taxi_out", "hold_short"))
+        # Roughly a runway's worth of queue: beyond this, another aircraft on
+        # stand adds delay and apron congestion, not throughput.
+        return waiting < 6
 
     def _claim_final(self, fid):
         """Take the final approach segment. A plain single-owner claim: no one
@@ -748,16 +787,83 @@ class Aerodrome:
             alt_fn=lambda p, s, t, a0=f["altitude"]: a0 + 2000 * p, pitch_fn=lambda p: 6.0)
         self._finish(f["id"], "diverted")
 
+    def _taxi_whole_route(self, f, route, v_cruise, status_label,
+                          v_entry=None, v_exit=2.0, skip_first_leg=False):
+        """Drive a taxi route, holding the whole clearance for its duration.
+
+        This is deliberately the simple, conservative design: acquire every
+        edge and junction of the route atomically in GroundNetwork's canonical
+        order, then drive it. That ordering is the entire proof that the
+        ground network cannot deadlock, and two attempts at being cleverer
+        both broke it in ways that took a 10-hour soak to surface:
+
+          * acquiring segment-by-segment in *travel* order let two aircraft
+            taxiing toward each other on the same apron lane acquire the same
+            segments in opposite orders and wedge head-on;
+          * splitting the route into apron/movement-area blocks and releasing
+            the apron behind us looked safe, but VABO's apron has only two
+            links to the taxiway, and both are taxilane-kind - so they landed
+            in the apron block, and aircraft sat holding a scarce apron exit
+            while queueing for the movement-area block, forming the same
+            cycle one level up.
+
+        Holding the whole route is less concurrent, but it is *correct*, and
+        apron congestion is better solved by not over-filling the apron in the
+        first place (see accepts_arrival and the turnaround/stand budget) than
+        by weakening the invariant that keeps the airfield from wedging.
+        """
+        fid = f["id"]
+        v_entry = v_cruise if v_entry is None else v_entry
+
+        # Poll for the whole clearance instead of blocking on it.
+        #
+        # GroundNetwork.acquire() takes keys one at a time, yielding on each -
+        # so an aircraft that blocks part-way through is holding the keys it
+        # already got while waiting for the rest. That is a
+        # lock-held-while-waiting edge in the wait-for graph, and it is enough
+        # to deadlock two departures against each other even though every
+        # acquisition follows the canonical order (the ordering argument
+        # assumes an all-or-nothing acquisition, which a yielding loop is
+        # not). try_acquire() is genuinely all-or-nothing: it takes every key
+        # or none, so a waiting aircraft holds nothing and can never be part
+        # of a cycle.
+        f["hold_reason"] = "awaiting taxi clearance"
+        keys = self.ground.route_keys(route)
+        while not self.ground.try_acquire(fid, keys):
+            yield self.env.timeout(10)
+        f["hold_reason"] = None
+        f["status"] = status_label
+
+        legs = route.legs[1:] if skip_first_leg else route.legs
+        for li, (edge, forward) in enumerate(legs):
+            pts = self.layout.edge_points(edge, forward)
+            is_last = li == len(legs) - 1
+            yield from self._traverse(
+                f, pts, v_entry if li == 0 else v_cruise, v_cruise,
+                v_exit if is_last else v_cruise,
+                accel=0.8, decel=1.2,
+                alt_fn=lambda p, s, t: 0.0, pitch_fn=lambda p: 0.0)
+
     def _taxi_in(self, f, ac):
         """From the runway turn-off to an allocated stand."""
         fid = f["id"]
         stand = self.stands.free_stand(ac)
         if stand is None:
-            # No stand: hold on the taxiway until one frees up. Real, and a good
-            # demonstration of apron capacity as a constraint.
+            # No stand: hold on the taxiway until one frees up. Real, and a
+            # good demonstration of apron capacity as a constraint - but
+            # capped, same reasoning as the departure route wait above: this
+            # aircraft is also still holding its runway-exit lock the whole
+            # time it waits here, so an unbounded wait risks tying up that
+            # exit for everyone else too, not just itself.
             f["status"] = "hold_short"
             f["hold_reason"] = "no stand available"
+            stand_wait_attempts = 0
             while stand is None:
+                stand_wait_attempts += 1
+                if stand_wait_attempts > 20:  # 20 * 20s ≈ 6.5 sim-minutes
+                    self.ground.release_all(fid)
+                    yield from self._divert(f)
+                    return
                 yield self.env.timeout(20)
                 stand = self.stands.free_stand(ac)
         yield from self.stands.occupy(fid, stand.id)
@@ -772,14 +878,61 @@ class Aerodrome:
         f["route"] = route.describe()
         f["cleared_to"] = f"taxi to {stand.name}"
         f["status"] = "hold_short"
-        yield from self.ground.acquire_route(fid, route)
+        f["hold_reason"] = "taxi clearance"
 
-        f["status"] = "taxi_in"
-        f["hold_reason"] = None
+        # An arrival sitting on the runway turn-off is holding pavement that
+        # departures need, so it must never JOIN A QUEUE for its taxi route
+        # while holding it - that is a lock held while waiting for locks, and
+        # it deadlocked arrivals against departures: the arrival waited on a
+        # junction owned by a departure, while the departure waited on apron
+        # edges owned by the arrival. Instead, poll non-blockingly: take the
+        # route only when it is free in one go, and while it is not, keep the
+        # exit but add nothing to the wait-for graph. The whole route is
+        # still taken atomically in canonical order, so the no-cycle argument
+        # is untouched.
+        # Take the taxi route without ever QUEUEING for it while parked on the
+        # runway turn-off. Two failure modes were ruled out here, in order:
+        #
+        #   * blocking on acquire_route() while holding the turn-off put a
+        #     lock-held-while-waiting edge into the wait-for graph and
+        #     deadlocked arrivals against departures outright;
+        #   * polling non-blockingly but *camping* on the turn-off until the
+        #     route came free was deadlock-safe but starved everyone: several
+        #     arrivals each sat on a turn-off holding three locks, blocking
+        #     the departures whose routes they needed AND the next arrival,
+        #     which then held for "no usable runway exit".
+        #
+        # So: poll, and if the route does not come free promptly, release the
+        # turn-off pavement (keeping only the stand booking) and wait clear of
+        # it before trying again. The aircraft is still on the ground and
+        # still going to its stand - it just stops being an obstacle while it
+        # waits, which is what a real aircraft told to hold clear would do.
         taxi_kt = self._taxi_speed(ac)
-        yield from self._traverse(
-            f, route.points(), 10, taxi_kt, 2, accel=0.8, decel=1.1,
-            alt_fn=lambda p, s, t: 0.0, pitch_fn=lambda p: 0.0)
+        route_keys = self.ground.route_keys(route)
+        clearance_attempts = 0
+        while not self.ground.try_acquire(fid, route_keys):
+            clearance_attempts += 1
+            if clearance_attempts % 6 == 0:
+                # Give back everything EXCEPT the pavement we are physically
+                # sitting on. Releasing that too (release_all) let a departure
+                # taxi straight through a parked arrival - 0.0 m separation,
+                # caught by the soak test. What we hand back is the part of
+                # the turn-off ahead of us; the exit edge and its node stay
+                # ours until we actually move off them.
+                keep = set()
+                exit_edge = self.layout.edges.get(f.get("_exit_edge"))
+                if exit_edge is not None:
+                    keep.update(self.ground.edge_keys(exit_edge))
+                keep.add(("N", f["_exit_node"]))
+                self.ground.release_all(fid, keep=keep)
+                alt = routing.plan(self.layout, f["_exit_node"], stand.node_id)
+                if alt is not None:
+                    route = alt
+                    route_keys = self.ground.route_keys(route)
+                    f["route"] = route.describe()
+            yield self.env.timeout(15)
+
+        yield from self._taxi_whole_route(f, route, taxi_kt, "taxi_in", v_entry=10, v_exit=2)
         self.ground.release_all(fid)
 
         f["lat"], f["lng"] = stand.pos
@@ -849,17 +1002,57 @@ class Aerodrome:
             yield from self._hold_position(f, 15, "ground_stop", self.ground_stop_reason or "ground stop")
 
         # --- plan the route, waiting if the runway direction is unusable --
+        # This wait is capped, unlike the ground-stop wait above it. A ground
+        # stop or bad weather is time-bounded - it always clears on its own
+        # (see _auto() callbacks in inject_disruption) - so waiting for it
+        # indefinitely is correct. "No hold point gives this aircraft enough
+        # runway" is a different kind of condition: for a fixed airport and a
+        # fixed active runway direction, if it's not solvable now it will
+        # never become solvable by waiting, only by the wind changing. A
+        # retry cap with a graceful cancellation is the difference between
+        # that showing up as one cancelled flight and freed stand, or as a
+        # stand lost for the rest of the session - which is exactly what
+        # happened before core/airports/vabo.py's A4 station was moved to
+        # match A1's setback (see the comment there): an A321 needing 2394 m
+        # of a 2472 m runway had no legal departure point whenever the wind
+        # put runway 22 into use, and every aircraft that turned around into
+        # that condition held its stand forever, one at a time, until the
+        # apron was full and nothing could arrive either.
         hold_node, route = self._plan_departure_route(f, stand)
+        route_wait_attempts = 0
         while hold_node is None:
+            route_wait_attempts += 1
+            if route_wait_attempts > 15:  # 15 * 20s = 5 sim-minutes
+                self.metrics["cancelled_departures"] += 1
+                f["hold_reason"] = "no legal departure point on this runway direction"
+                self.stands.vacate(fid)
+                self._finish(fid, "despawned")
+                return
             yield from self._hold_position(f, 20, "scheduled", "awaiting usable runway")
             if self.ground_stop:
                 continue
             hold_node, route = self._plan_departure_route(f, stand)
 
-        # --- pushback: acquire the whole route first, then push ----------
+        # --- pushback: only the stand lead-in, not the whole route --------
+        # Acquiring the entire taxi route before being allowed to move was the
+        # second gridlock cause (see _taxi_incremental's docstring): with a
+        # full apron, every ready departure needed to lock every segment of a
+        # shared lane before any of them could take a first step, so none of
+        # them ever did. Pushback now takes only the pavement it physically
+        # occupies - the stand lead-in and the lane junction it backs onto -
+        # and the taxi out acquires the rest a segment at a time.
+        # Take the whole clearance before moving. Anything acquired outside
+        # this single canonical-order acquisition - even just the stand
+        # lead-in for the pushback - is a lock held out of order, which is
+        # exactly how the head-on apron deadlock got in.
+        # All-or-nothing, for the same reason as the taxi clearance above: a
+        # partial acquisition here holds apron edges while queueing for the
+        # rest of the route, which deadlocks departures against each other.
         f["status"] = "scheduled"
         f["hold_reason"] = "awaiting pushback clearance"
-        yield from self.ground.acquire_route(fid, route)
+        push_keys = self.ground.route_keys(route)
+        while not self.ground.try_acquire(fid, push_keys):
+            yield self.env.timeout(10)
         f["hold_reason"] = None
 
         pts = route.points()
@@ -880,14 +1073,16 @@ class Aerodrome:
         yield from self._hold_position(f, 20, "pushback", "disconnecting tug")
 
         # --- taxi out to the holding point --------------------------------
+        # Pushback already covered the stand lead-in (leg 0), so the rolling
+        # taxi picks up from leg 1 with those resources already in hand.
         taxi_start = self.env.now
         f["status"] = "taxi_out"
         f["cleared_to"] = f"taxi to {hold_node.label or hold_node.id} via {route.describe()}"
         f["hold_reason"] = None
         taxi_kt = self._taxi_speed(ac)
-        yield from self._traverse(
-            f, pts[push_end:], 3, taxi_kt, 3, accel=0.7, decel=1.1,
-            alt_fn=lambda p, s, t: 0.0, pitch_fn=lambda p: 0.0)
+        yield from self._taxi_whole_route(
+            f, route, taxi_kt, "taxi_out", v_entry=3, v_exit=3,
+            skip_first_leg=True)
         self.metrics["total_taxi_out_s"] += self.env.now - taxi_start
         self.metrics["taxi_out_samples"] += 1
 
@@ -928,7 +1123,9 @@ class Aerodrome:
                 if new_hold and new_hold.id != hold_node.id:
                     self.runway_ctl.departure_queue.remove(fid)
                     self.ground.release_all(fid)
-                    yield from self.ground.acquire_route(fid, new_route)
+                    new_keys = self.ground.route_keys(new_route)
+                    while not self.ground.try_acquire(fid, new_keys):
+                        yield self.env.timeout(10)
                     yield from self._traverse(f, new_route.points(), 3, taxi_kt, 3,
                                               alt_fn=lambda p, s, t: 0.0)
                     hold_node = new_hold
@@ -962,7 +1159,9 @@ class Aerodrome:
         entry_id = self._runway_entry_for(hold_node)
         entry = self.layout.nodes[entry_id]
         if link_edge is not None:
-            yield from self.ground.acquire(fid, self.ground.edge_keys(link_edge))
+            link_keys = self.ground.edge_keys(link_edge)
+            while not self.ground.try_acquire(fid, link_keys):
+                yield self.env.timeout(5)
 
         f["status"] = "lineup"
         f["cleared_to"] = f"line up and wait {self.runway_ctl.active_end_ident}"

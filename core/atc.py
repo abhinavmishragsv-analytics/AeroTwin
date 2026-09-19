@@ -119,6 +119,17 @@ class GroundNetwork:
         The caller is stationary while this is pending - that is an aircraft
         holding position waiting for taxi clearance, which is what should
         happen when the route ahead is occupied.
+
+        The canonical ordering is load-bearing, not cosmetic. Acquiring in a
+        fixed global order is the entire reason the ground network cannot
+        deadlock (the standard resource-hierarchy argument), and it only
+        holds if EVERY acquisition anywhere follows it - including
+        incremental ones. Acquiring a route piecemeal in travel order breaks
+        it outright: two aircraft taxiing toward each other along the same
+        apron lane acquire the same segments in opposite orders, each ends up
+        holding what the other needs next, and the pair wedges permanently.
+        That is not hypothetical - it is what happened when this was tried,
+        and why `reserve_corridor` below exists instead.
         """
         held = self._held.setdefault(flight_id, {})
         for key in self._sorted(keys):

@@ -75,7 +75,19 @@ ALPHA_STATIONS = {
     "A1": 60.0,     # abeam RWY 04 threshold
     "A2": 780.0,
     "A3": 1450.0,   # abeam the apron
-    "A4": 2390.0,   # abeam RWY 22 threshold
+    # 60 m short of the 22 threshold, matching A1's setback from the 04
+    # threshold (RWY_LENGTH - 60, not a separately-chosen number). The two
+    # full-length departure points need matching setbacks - a hold point
+    # even a few extra metres short of its threshold measurably shrinks the
+    # takeoff run available in that direction, and for an aircraft whose
+    # TODR is a tight fraction of the runway length (an A321 here needs
+    # 2394 m of a 2472 m runway), that's the difference between "every
+    # departure candidate qualifies" and "none of them do, ever, whenever
+    # the wind favours this direction" - which is exactly what a 2390 m
+    # placement (82 m short) used to cause: see the retry cap in
+    # twin_sim._depart_from_stand for the failure mode this produced when
+    # it happened anyway.
+    "A4": RWY_LENGTH - 60.0,
 }
 # Rapid exits are placed where a narrow-body actually slows to turning speed:
 # roughly 1,500-1,800 m past the threshold it is using. B1 serves landings on
