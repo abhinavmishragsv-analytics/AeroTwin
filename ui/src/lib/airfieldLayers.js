@@ -201,36 +201,46 @@ function bearingDeg([lng1, lat1], [lng2, lat2]) {
 }
 
 /**
- * Tower-cab camera: positioned AT the airport's control tower, looking out
- * toward the field - not just "zoomed in on the runway" (what this used to
- * do). The camera target is the tower's own ground position (from the
- * `position` field geometry.py now sends on every building), the bearing is
- * computed to face the runway, and the pitch is steep enough to feel like
- * looking down from height rather than the top-down orbit view.
+ * Tower-cam: an elevated, bird's-eye aerial angle framed from the side of the
+ * field where the ATC tower actually stands - not the previous version,
+ * which put the camera's *target* at the tower and pitched it steep (80 deg),
+ * which reads as standing at ground level staring down the runway, not as a
+ * bird's-eye shot from the tower's side. That was the wrong read of "tower
+ * cab view".
  *
- * MapView's camera always looks AT its target from a distance implied by
- * zoom, so this can't place the eye at an exact metre altitude the way a
- * dedicated FirstPersonView could - doing that would mean dropping the
- * MapLibre satellite basemap, since react-map-gl only syncs to a standard
- * Web Mercator view. What this gets right, and what actually mattered: a
- * real vantage point (the tower's coordinates, not the airport centre) and a
- * real look-at direction (out across the runway, not down at it).
+ * The fix keeps the same bird's-eye family of pitch as the orbit view
+ * (moderate, not near-horizontal) but frames the shot around the tower's
+ * side of the airfield rather than dead-centre over the runway: the camera
+ * target is blended most of the way from the airport's centre toward the
+ * tower's own coordinates (from the `position` field geometry.py sends on
+ * every building), and the bearing faces from the tower toward the field
+ * centre, so what's "up" on screen is the direction you'd actually be
+ * looking if you were watching from where the tower lives.
+ *
+ * Still MapView, not a true FirstPersonView eye-level camera - that would
+ * mean dropping the MapLibre satellite basemap, since react-map-gl only
+ * syncs to a standard Web Mercator view - so this is an aerial angle near
+ * the tower's position, not a window-of-the-cab view. That's the right
+ * trade for "bird's eye from the side", which is what was actually asked
+ * for; it would be the wrong trade for a literal stand-in-the-cab view.
  */
 export function towerViewState(layout) {
   if (!layout) return airportViewState(layout);
   const tower = (layout.buildings || []).find((b) => b.kind === "tower");
-  const rwy = layout.runways?.[0];
-  if (!tower || !rwy) return { ...airportViewState(layout), pitch: 75, zoom: 17.2 };
+  if (!tower) return { ...airportViewState(layout), pitch: 58, zoom: 16.2 };
 
   const towerPos = tower.position; // [lng, lat]
-  const aimAt = rwy.ends[0].threshold; // [lng, lat] - look out toward the runway
-  const bearing = bearingDeg(towerPos, aimAt);
+  const arp = layout.arp; // [lng, lat] - the field's centre
 
-  return {
-    longitude: towerPos[0],
-    latitude: towerPos[1],
-    zoom: 17.6,
-    pitch: 80,
-    bearing,
-  };
+  // Bias the framing toward the tower's side without centring on the tower
+  // building itself - a shot centred exactly on the tower shows mostly the
+  // tower; a shot centred on the field shows nothing of "from the tower's
+  // side". 0.55 keeps most of the runway and apron in frame while still
+  // reading as offset toward where the tower is.
+  const blend = 0.55;
+  const longitude = arp[0] + (towerPos[0] - arp[0]) * blend;
+  const latitude = arp[1] + (towerPos[1] - arp[1]) * blend;
+  const bearing = bearingDeg(towerPos, arp);
+
+  return { longitude, latitude, zoom: 16.2, pitch: 58, bearing };
 }
