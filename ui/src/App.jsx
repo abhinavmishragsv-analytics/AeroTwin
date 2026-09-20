@@ -166,7 +166,6 @@ export default function App() {
     let raf;
     const tick = () => {
       const now = performance.now();
-      nowMsRef.current = now;
       const sampled = interpolatorRef.current.sample(now);
       setRenderFlights(sampled);
 
