@@ -16,7 +16,7 @@ export default function AirportSwitcher({ airports, current }) {
     >
       {airports.map((a) => (
         <option key={a.icao} value={a.slug}>
-          {a.city} ({a.iata}) {a.detail === "representative" ? "· demo" : ""}
+          {a.city} ({a.iata})
         </option>
       ))}
     </select>

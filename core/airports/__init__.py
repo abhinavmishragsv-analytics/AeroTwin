@@ -96,10 +96,15 @@ def _vaah():
 
 def _vapo():
     # Pune (Lohegaon). Runway 10/28, shared with the Indian Air Force.
+    # Thresholds re-surveyed against the published AIP AD 2.12 coordinates
+    # (THR 10: 183459N 0735423E, THR 28: 183453N 0735549E) - the previous
+    # pair put threshold 10 about 550 m from the real pavement and skewed
+    # the runway's true bearing off the charted 094 deg, which is what threw
+    # every taxiway/apron/stand generated off the actual airport too.
     return build_airport(
         icao="VAPO", iata="PNQ", name="Pune Airport (Lohegaon)",
         city="Pune", slug="pune",
-        thresholds=((18.58600, 73.90100), (18.58120, 73.93150)),
+        thresholds=((18.58306, 73.90639), (18.58139, 73.93028)),
         idents=("10", "28"),
         elevation_m=594.0,
         n_contact_stands=6, n_remote_stands=4,
@@ -112,11 +117,17 @@ def _vapo():
 
 
 def _vasu():
-    # Surat. Runway 04/22.
+    # Surat. Runway 04/22. Thresholds re-surveyed against the published AIP
+    # AD 2.12 coordinates (physical RWY 04 begin: 210622.49N 0724401.97E;
+    # physical RWY end: 210731.63N 0724510.62E) - the previous pair put the
+    # whole runway roughly 900 m west of the real pavement and about 1.2 km
+    # short of its charted 2906 m length, which is why the generated
+    # taxiways and apron floated over open ground on the satellite basemap
+    # instead of sitting on Surat's actual runway.
     return build_airport(
         icao="VASU", iata="STV", name="Surat International Airport",
         city="Surat", slug="surat",
-        thresholds=((21.10900, 72.72900), (21.12350, 72.75050)),
+        thresholds=((21.10625, 72.73388), (21.12545, 72.75295)),
         idents=("04", "22"),
         elevation_m=8.0,
         n_contact_stands=6, n_remote_stands=3,
@@ -130,13 +141,26 @@ def _vasu():
 
 def _vegt():
     # Lokpriya Gopinath Bordoloi International, Guwahati. Runway 02/20, the
-    # main gateway to North-East India. Single runway, joint civil/military.
+    # main gateway to North-East India. Single runway, joint civil/military -
+    # and that split is why this one needed more than a threshold fix. The
+    # runway thresholds themselves check out against AIP AD 2.2's ARP offset
+    # (1269 m from the physical beginning of RWY02 on a 27.5 deg bearing),
+    # but the generic builder's default taxiway_offset/apron_lane_offset/
+    # stand_offset/terminal_offset are all negative, which places the whole
+    # apron on the LEFT of the 02->20 centreline - the west side, which per
+    # Guwahati's own AIC is "Taxiways L1-L4 on the west side... for Military
+    # use Only". The real civil terminal, apron and ATC tower are on the
+    # RIGHT (east) side (confirmed against the tower's charted position in
+    # AD 2.10), so every positive offset below mirrors the whole complex
+    # across the runway onto the correct, civil side.
     return build_airport(
         icao="VEGT", iata="GAU", name="Lokpriya Gopinath Bordoloi International Airport",
         city="Guwahati", slug="guwahati",
         thresholds=((26.09470, 91.58060), (26.11750, 91.59120)),
         idents=("02", "20"),
         elevation_m=49.0, runway_width=46.0,
+        taxiway_offset=190.0, apron_lane_offset=280.0,
+        stand_offset=330.0, terminal_offset=395.0,
         n_contact_stands=9, n_remote_stands=5,
         movements_per_hour=16,
         fleet_mix={"A20N": 0.40, "B738": 0.14, "A321": 0.16, "AT76": 0.20, "Q400": 0.10},

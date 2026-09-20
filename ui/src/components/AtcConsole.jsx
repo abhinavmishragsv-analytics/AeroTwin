@@ -1,4 +1,5 @@
-import { memo } from "react";
+import { memo, useState } from "react";
+import CollapseToggle from "./CollapseToggle";
 /**
  * AtcConsole - the write side of the bi-directional twin. Each button posts
  * a disruption to POST /api/airports/{icao}/disrupt and the live simulation
@@ -17,33 +18,44 @@ const ACTIONS = [
 ];
 
 function AtcConsole({ onDisrupt, disruptions }) {
+  const [collapsed, setCollapsed] = useState(false);
   return (
-    <div className="panel console">
-      <div className="panel-title warn">⚠ ATC DISRUPTION CONSOLE</div>
-      <div className="console-grid">
-        {ACTIONS.map((a) => (
-          <button
-            key={a.type}
-            className="console-btn"
-            onClick={() => onDisrupt(a.type, a.minutes, a.target)}
-          >
-            {a.icon} {a.label} {a.minutes > 0 ? `${a.minutes}m` : ""}
-          </button>
-        ))}
-        <button className="console-btn clear" onClick={() => onDisrupt("clear", 0)}>
-          ✅ Clear All
-        </button>
+    <div className={`panel console ${collapsed ? "collapsed" : ""}`}>
+      <div className="panel-header">
+        <div className="panel-title warn">⚠ ATC DISRUPTION CONSOLE</div>
+        <CollapseToggle collapsed={collapsed} onToggle={() => setCollapsed((c) => !c)} />
       </div>
-      {disruptions?.length > 0 && (
-        <div className="console-log">
-          {disruptions.slice(0, 4).map((d, i) => (
-            <div key={i} className="log-line">
-              T+{d.time.toFixed(0)}s — {d.label}
+      {!collapsed && (
+        <>
+          <div className="console-grid">
+            {ACTIONS.map((a) => (
+              <button
+                key={a.type}
+                className="console-btn"
+                onClick={() => onDisrupt(a.type, a.minutes, a.target)}
+              >
+                {a.icon} {a.label} {a.minutes > 0 ? `${a.minutes}m` : ""}
+              </button>
+            ))}
+            <button className="console-btn clear" onClick={() => onDisrupt("clear", 0)}>
+              ✅ Clear All
+            </button>
+          </div>
+          {disruptions?.length > 0 && (
+            <div className="console-log">
+              {disruptions.slice(0, 4).map((d, i) => (
+                <div key={i} className="log-line">
+                  T+{d.time.toFixed(0)}s — {d.label}
+                </div>
+              ))}
             </div>
-          ))}
-        </div>
+          )}
+          <div className="console-note">
+            Every action here mutates the live SimPy twin. Weather effects (fog, crosswind,
+            thunderstorm, ...) stack - trigger several at once and each runs on its own timer.
+          </div>
+        </>
       )}
-      <div className="console-note">Every action here mutates the live SimPy twin.</div>
     </div>
   );
 }

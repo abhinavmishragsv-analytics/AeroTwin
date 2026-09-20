@@ -1,4 +1,5 @@
-import { memo } from "react";
+import { memo, useState } from "react";
+import CollapseToggle from "./CollapseToggle";
 /**
  * FlightStrips - the scrolling telemetry list: callsign, type, status,
  * current clearance, and why an aircraft is holding, if it is. This is the
@@ -19,38 +20,44 @@ const STATUS_LABEL = {
 };
 
 function FlightStrips({ flights, selectedId, onSelect }) {
+  const [collapsed, setCollapsed] = useState(false);
   const active = (flights || [])
     .filter((f) => f.status !== "parked")
     .sort((a, b) => (a.status === "hold_short") - (b.status === "hold_short"));
 
   return (
-    <div className="panel strips">
-      <div className="panel-title">ACTIVE FLIGHT TELEMETRY</div>
-      <div className="strips-list">
-        {active.length === 0 && <div className="strips-empty">No active movements</div>}
-        {active.map((f) => (
-          <div
-            key={f.id}
-            className={`strip ${f.id === selectedId ? "strip-selected" : ""}`}
-            onClick={() => onSelect && onSelect(f.id === selectedId ? null : f.id)}
-          >
-            <div className="strip-row1">
-              <span className="callsign">{f.id}</span>
-              <span className="strip-badge">{STATUS_LABEL[f.status] || f.status}</span>
-            </div>
-            <div className="strip-row2">
-              <span>{f.type}</span>
-              <span>{f.speed} kt</span>
-              <span>{Math.round(f.altitude || 0)} m</span>
-              {typeof f.risk === "number" && (
-                <span className={f.risk > 0.5 ? "risk bad" : "risk"}>Risk: {f.risk.toFixed(2)}</span>
-              )}
-            </div>
-            {f.cleared_to && <div className="strip-clearance">→ {f.cleared_to}</div>}
-            {f.hold_reason && <div className="strip-hold">⏸ {f.hold_reason}</div>}
-          </div>
-        ))}
+    <div className={`panel strips ${collapsed ? "collapsed" : ""}`}>
+      <div className="panel-header">
+        <div className="panel-title">ACTIVE FLIGHT TELEMETRY</div>
+        <CollapseToggle collapsed={collapsed} onToggle={() => setCollapsed((c) => !c)} />
       </div>
+      {!collapsed && (
+        <div className="strips-list">
+          {active.length === 0 && <div className="strips-empty">No active movements</div>}
+          {active.map((f) => (
+            <div
+              key={f.id}
+              className={`strip ${f.id === selectedId ? "strip-selected" : ""}`}
+              onClick={() => onSelect && onSelect(f.id === selectedId ? null : f.id)}
+            >
+              <div className="strip-row1">
+                <span className="callsign">{f.id}</span>
+                <span className="strip-badge">{STATUS_LABEL[f.status] || f.status}</span>
+              </div>
+              <div className="strip-row2">
+                <span>{f.type}</span>
+                <span>{f.speed} kt</span>
+                <span>{Math.round(f.altitude || 0)} m</span>
+                {typeof f.risk === "number" && (
+                  <span className={f.risk > 0.5 ? "risk bad" : "risk"}>Risk: {f.risk.toFixed(2)}</span>
+                )}
+              </div>
+              {f.cleared_to && <div className="strip-clearance">→ {f.cleared_to}</div>}
+              {f.hold_reason && <div className="strip-hold">⏸ {f.hold_reason}</div>}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

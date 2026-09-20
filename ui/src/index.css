@@ -4,7 +4,12 @@ body { font-family: "Inter", system-ui, sans-serif; color: #e6ecf5; }
 
 .app-root { position: relative; width: 100vw; height: 100vh; overflow: hidden; }
 
-.overlay { position: absolute; top: 16px; z-index: 5; display: flex; flex-direction: column; gap: 12px; max-height: calc(100vh - 32px); }
+/* z-index: 25 - must clear .flight-detail-panel (15). Panels in here are
+   positioned/z-indexed relative to THIS box (it's a stacking context), so a
+   descendant like .violations-popover having a higher z-index than 15 does
+   nothing on its own if .overlay itself is capped below 15 - the whole
+   subtree paints as one unit at the parent's z-index. */
+.overlay { position: absolute; top: 16px; z-index: 25; display: flex; flex-direction: column; gap: 12px; max-height: calc(100vh - 32px); }
 .overlay.top-left { left: 16px; width: 340px; }
 .overlay.top-right { right: 16px; width: 300px; align-items: stretch; }
 
@@ -35,6 +40,24 @@ body { font-family: "Inter", system-ui, sans-serif; color: #e6ecf5; }
 
 .panel-title { font-size: 11px; font-weight: 700; letter-spacing: 0.06em; opacity: 0.75; margin-bottom: 8px; }
 .panel-title.warn { color: #fab005; }
+
+/* --- Collapsible panel header: title + a small chevron that folds the
+   panel's body away so the map underneath is easier to see -------------- */
+.panel-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.panel-header .panel-title {
+  margin-bottom: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.panel-collapse-btn {
+  display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
+  width: 18px; height: 18px; margin-left: 6px; border-radius: 6px;
+  background: rgba(255,255,255,0.1); color: #b8c2d4; border: none;
+  font-size: 9px; line-height: 1; cursor: pointer; padding: 0;
+  transition: background 0.15s, transform 0.15s;
+}
+.panel-collapse-btn:hover { background: rgba(77,163,255,0.3); color: #fff; }
+.panel-collapse-btn .chevron { display: inline-block; transition: transform 0.15s; }
+.panel-collapse-btn.collapsed .chevron { transform: rotate(-90deg); }
+.panel.collapsed { padding-bottom: 14px; }
 
 .strips { max-height: 320px; overflow-y: auto; }
 .strips-list { display: flex; flex-direction: column; gap: 8px; }
@@ -100,7 +123,12 @@ body { font-family: "Inter", system-ui, sans-serif; color: #e6ecf5; }
 .metric-label .info-icon:hover { background: rgba(77,163,255,0.35); color: #fff; }
 
 .violations-popover {
-  position: absolute; top: calc(100% + 8px); left: 0; z-index: 20;
+  /* Rendered through a portal into document.body (see HUD.jsx) with its
+     position set inline from the anchor's on-screen coordinates, so `fixed`
+     here is relative to the viewport, not any ancestor panel - and the
+     z-index only has to clear other floating UI, not fight its way out of
+     a stacking context several panels deep. */
+  position: fixed; z-index: 9999;
   width: 260px; max-width: 70vw;
   background: rgba(12,16,24,0.97); border: 1px solid rgba(255,255,255,0.12);
   border-radius: 10px; padding: 10px 12px; box-shadow: 0 12px 30px rgba(0,0,0,0.5);

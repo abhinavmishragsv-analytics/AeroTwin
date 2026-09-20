@@ -115,6 +115,14 @@ class Aerodrome:
         self.weather = dict(CLEAR_WEATHER)
         self.weather["wind_dir_deg"] = layout.default_wind_dir_deg
         self.weather["wind_kt"] = layout.default_wind_kt
+        # Independent, simultaneously-active weather effects (fog, crosswind,
+        # a thunderstorm, ...), keyed by disruption kind - see
+        # `_set_weather_effect`/`_recompute_weather` for how these combine
+        # into `self.weather` above without one effect's expiry wiping out
+        # every other effect still running.
+        self.active_weather_effects = {}
+        self._weather_effect_tokens = {}
+        self._weather_effect_seq = 0
         self.ground_stop = False
         self.ground_stop_reason = None
         self.active_disruptions = []
@@ -1379,35 +1387,42 @@ class Aerodrome:
             msg = f"Ground stop: no departures for {duration_minutes:.0f} min"
 
         elif kind == "fog":
-            self.weather.update({"visibility_m": 350, "ceiling_ft": 100, "condition": "FOG"})
-            self.env.process(self._auto(self._clear_weather, duration_s))
+            self._set_weather_effect(
+                "fog", {"visibility_m": 350, "ceiling_ft": 100, "condition": "FOG"}, duration_s)
             end = self.runway_ctl.active_end()
             msg = (f"Fog: RVR 350 m, ceiling 100 ft. {self.layout.icao} RWY {end.ident} is "
                    f"{end.ils_category.replace('_', ' ')} - arrivals below minima")
 
         elif kind == "low_visibility":
-            self.weather.update({"visibility_m": 900, "ceiling_ft": 250, "condition": "MIST"})
-            self.env.process(self._auto(self._clear_weather, duration_s))
+            self._set_weather_effect(
+                "low_visibility", {"visibility_m": 900, "ceiling_ft": 250, "condition": "MIST"}, duration_s)
             msg = f"Low visibility procedures for {duration_minutes:.0f} min"
 
         elif kind == "high_wind":
-            self.weather.update({"wind_kt": 38, "wind_dir_deg": (self.runway_ctl.active_end().heading_deg + 95) % 360,
-                                 "condition": "HIGH_WIND"})
-            self.env.process(self._auto(self._clear_weather, duration_s))
+            self._set_weather_effect(
+                "high_wind",
+                {"wind_kt": 38, "wind_dir_deg": (self.runway_ctl.active_end().heading_deg + 95) % 360,
+                 "condition": "HIGH_WIND"},
+                duration_s)
             msg = "Crosswind 38 kt across the runway - beyond code C limits"
 
         elif kind == "wind_shift":
             end = self.runway_ctl.active_end()
-            self.weather.update({"wind_dir_deg": end.heading_deg % 360, "wind_kt": 18,
-                                 "condition": "WIND_SHIFT"})
+            # No duration_s here (None) - this one is permanent until a
+            # "clear" is issued, matching the previous behaviour.
+            self._set_weather_effect(
+                "wind_shift", {"wind_dir_deg": end.heading_deg % 360, "wind_kt": 18,
+                               "condition": "WIND_SHIFT"}, None)
             msg = "Wind shift - runway direction under review"
 
         elif kind == "thunderstorm":
-            self.weather.update({"visibility_m": 2200, "ceiling_ft": 700, "wind_kt": 28,
-                                 "wet": True, "condition": "THUNDERSTORM"})
+            self._set_weather_effect(
+                "thunderstorm",
+                {"visibility_m": 2200, "ceiling_ft": 700, "wind_kt": 28, "wet": True,
+                 "condition": "THUNDERSTORM"},
+                duration_s)
             for c in self.runway_ctls.values():
                 c.close_for(min(duration_s, 900))
-            self.env.process(self._auto(self._clear_weather, duration_s))
             msg = "Thunderstorm overhead - runway suspended, surface wet"
 
         elif kind == "taxiway_closure":
@@ -1428,7 +1443,9 @@ class Aerodrome:
                 c.reopen()
             self.ground_stop = False
             self.ground_stop_reason = None
-            self._clear_weather()
+            self.active_weather_effects = {}
+            self._weather_effect_tokens = {}
+            self._recompute_weather()
             for name in {e.name for e in self.layout.edges.values()}:
                 self.ground.close_taxiway(name, False)
             msg = "All disruptions cleared - normal operations resumed"
@@ -1445,10 +1462,110 @@ class Aerodrome:
         yield self.env.timeout(delay_s)
         fn()
 
-    def _clear_weather(self):
+    # Fixed, deterministic combination order so the same set of active
+    # effects always produces the same "A + B + C" condition label
+    # regardless of which order they were clicked in.
+    _WEATHER_EFFECT_ORDER = ("fog", "low_visibility", "wind_shift", "high_wind", "thunderstorm")
+
+    def _set_weather_effect(self, kind, fields, duration_s):
+        """Register (or refresh) one named weather effect and recombine.
+
+        Effects are additive and independent, keyed by `kind`: injecting
+        `high_wind` while `fog` is still active keeps fog's reduced
+        visibility instead of clobbering it with clear-air defaults, and
+        each effect expires on its own timer. Previously every weather
+        disruption shared one `self.weather` dict and one `_clear_weather`
+        callback, so a later 10-minute thunderstorm would reset a still-
+        running 20-minute fog back to clear skies ten minutes early - and
+        the single `condition` field could only ever show the most recently
+        injected effect's name, even while an earlier one was still active.
+        """
+        self._weather_effect_seq += 1
+        token = self._weather_effect_seq
+        self._weather_effect_tokens[kind] = token
+        self.active_weather_effects[kind] = dict(fields)
+        self._recompute_weather()
+        if duration_s:
+            self.env.process(self._auto_clear_weather_effect(kind, token, duration_s))
+
+    def _auto_clear_weather_effect(self, kind, token, delay_s):
+        yield self.env.timeout(delay_s)
+        # Only remove it if this is still the activation that scheduled this
+        # timer - if the same effect was re-triggered (refreshing/extending
+        # it) after this timer was set, an older timer must not clear the
+        # newer activation out from under it.
+        if self._weather_effect_tokens.get(kind) == token:
+            self.active_weather_effects.pop(kind, None)
+            self._weather_effect_tokens.pop(kind, None)
+            self._recompute_weather()
+
+    def _recompute_weather(self):
+        """Recombine every still-active weather effect into `self.weather`.
+
+        Starts from the airport's clear-sky baseline, then layers each
+        active effect on top: visibility and ceiling take the worst (lowest)
+        value any active effect sets, "wet" is true if any effect sets it,
+        and the displayed wind is whichever active effect is pushing hardest
+        (highest wind_kt) since two effects can't both dictate the wind
+        direction at once. `condition` becomes every active effect's label
+        joined together (e.g. "FOG + HIGH_WIND + THUNDERSTORM"), or "CLEAR"
+        with nothing active.
+        """
+        base_wind_dir = self.layout.default_wind_dir_deg
+        base_wind_kt = self.layout.default_wind_kt
+
+        if not self.active_weather_effects:
+            self.weather.clear()
+            self.weather.update(CLEAR_WEATHER)
+            self.weather["wind_dir_deg"] = base_wind_dir
+            self.weather["wind_kt"] = base_wind_kt
+            return
+
+        visibility_m = CLEAR_WEATHER["visibility_m"]
+        ceiling_ft = CLEAR_WEATHER["ceiling_ft"]
+        wind_kt = base_wind_kt
+        wind_dir_deg = base_wind_dir
+        dominant_wind_kt = -1.0
+        wet = False
+        labels = []
+
+        ordered_kinds = [k for k in self._WEATHER_EFFECT_ORDER if k in self.active_weather_effects]
+        # Any future/unknown kind (defensive - keeps a typo from silently
+        # dropping an effect) still gets combined in, just after the known
+        # ones, in whatever order it was inserted.
+        ordered_kinds += [k for k in self.active_weather_effects if k not in ordered_kinds]
+
+        for kind in ordered_kinds:
+            eff = self.active_weather_effects[kind]
+            if "visibility_m" in eff:
+                visibility_m = min(visibility_m, eff["visibility_m"])
+            if "ceiling_ft" in eff:
+                ceiling_ft = min(ceiling_ft, eff["ceiling_ft"])
+            if eff.get("wet"):
+                wet = True
+            if "wind_kt" in eff and eff["wind_kt"] > dominant_wind_kt:
+                dominant_wind_kt = eff["wind_kt"]
+                wind_kt = eff["wind_kt"]
+                wind_dir_deg = eff.get("wind_dir_deg", wind_dir_deg)
+            if eff.get("condition"):
+                labels.append(eff["condition"])
+
+        self.weather.clear()
         self.weather.update(CLEAR_WEATHER)
-        self.weather["wind_dir_deg"] = self.layout.default_wind_dir_deg
-        self.weather["wind_kt"] = self.layout.default_wind_kt
+        self.weather.update({
+            "visibility_m": visibility_m,
+            "ceiling_ft": ceiling_ft,
+            "wind_kt": wind_kt,
+            "wind_dir_deg": wind_dir_deg,
+            "wet": wet,
+            "condition": " + ".join(labels) if labels else "CLEAR",
+        })
+
+    def _clear_weather(self):
+        """Drop every active weather effect and return to clear skies."""
+        self.active_weather_effects = {}
+        self._weather_effect_tokens = {}
+        self._recompute_weather()
 
     def _emergency_arrival(self):
         ac = fleet.get("A20N")
