@@ -77,6 +77,14 @@ MAX_APPROACH_ATTEMPTS = 2          # go-arounds before diverting
 DISRUPTION_MAX_MINUTES = 180
 DISRUPTION_LOG_LIMIT = 25
 
+# status_snapshot() is broadcast at STREAM_HZ (15/s); the four
+# ModelRegistry-backed analytics fields it includes are cached and only
+# actually recomputed this often (real wall-clock seconds, independent of
+# TIME_COMPRESSION) - see Aerodrome._analytics_snapshot() for why paying
+# sklearn/XGBoost inference cost on every single broadcast tick isn't
+# worth it for values that don't meaningfully change that fast anyway.
+ANALYTICS_REFRESH_S = 1.0
+
 CLEAR_WEATHER = {
     "visibility_m": 8000,
     "ceiling_ft": 3000,

@@ -105,7 +105,9 @@ def path_length_m(points) -> float:
 def point_along_path(points, distance):
     """Position and heading at `distance` metres along a polyline.
 
-    Returns (point, heading). Clamps to the ends.
+    Returns (point, heading). Clamps to the ends. Rescans from the start of
+    `points` every call - fine for one-off lookups, but see PathCursor below
+    for the case this function is NOT a good fit for.
     """
     if distance <= 0:
         return points[0], bearing_deg(points[0], points[1])
@@ -119,6 +121,59 @@ def point_along_path(points, distance):
             return interpolate(points[i], points[i + 1], t), bearing_deg(points[i], points[i + 1])
         travelled += seg
     return points[-1], bearing_deg(points[-2], points[-1])
+
+
+class PathCursor:
+    """Stateful walk along a polyline for monotonically non-decreasing queries.
+
+    point_along_path() rescans from the start of the polyline on every call,
+    which was a fine cost when a taxi route was 5-10 waypoints. It stopped
+    being fine once smooth_path() started expanding a route into dozens-to-
+    hundreds of points: _traverse() (core/twin_sim.py) calls this once per
+    STEP_DT physics tick with a distance `s` that only ever grows over the
+    course of one traversal, so rescanning from zero every tick turned an
+    O(n) per-tick cost into an O(n^2) cost for the traversal as a whole -
+    negligible at 6 points, measurably not negligible at 130.
+
+    This keeps a cursor (which segment the previous call landed in, and the
+    cumulative distance travelled up to it) so each call only walks FORWARD
+    from wherever the last call left off. Amortized O(1) per tick, O(n)
+    total per traversal - the same total cost paying for the whole route
+    once that point_along_path always had, just no longer paid for on every
+    single tick along the way.
+
+    Only valid when `distance` is non-decreasing across calls to the same
+    cursor - which is exactly (and only) how _traverse()'s speed-profile
+    loop advances `s`. Anything that needs a one-off or non-monotonic
+    lookup should use point_along_path() instead.
+    """
+
+    __slots__ = ("points", "_i", "_travelled")
+
+    def __init__(self, points):
+        self.points = points
+        self._i = 0
+        self._travelled = 0.0
+
+    def at(self, distance):
+        points = self.points
+        if distance <= 0:
+            return points[0], bearing_deg(points[0], points[1])
+        n = len(points) - 1
+        while self._i < n:
+            seg = distance_m(points[self._i], points[self._i + 1])
+            if seg <= 1e-9:
+                self._i += 1
+                continue
+            if self._travelled + seg >= distance:
+                t = (distance - self._travelled) / seg
+                return (
+                    interpolate(points[self._i], points[self._i + 1], t),
+                    bearing_deg(points[self._i], points[self._i + 1]),
+                )
+            self._travelled += seg
+            self._i += 1
+        return points[-1], bearing_deg(points[-2], points[-1])
 
 
 def smooth_path(points, spacing_m=6.0, alpha=0.5):

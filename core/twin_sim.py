@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import math
 import random
+import time
 
 import simpy
 
@@ -40,6 +41,7 @@ from core import aircraft as fleet
 from core import atc as atc_mod
 from core import routing
 from core.config import (
+    ANALYTICS_REFRESH_S,
     ARRIVAL_SHARE,
     CLEAR_WEATHER,
     DECISION_RANGE_M,
@@ -66,7 +68,7 @@ from core.geo import (
     interpolate,
     lerp_heading,
     path_length_m,
-    point_along_path,
+    PathCursor,
     smooth_path,
 )
 from core.models import registry
@@ -107,6 +109,12 @@ class Aerodrome:
         # been assigned one yet (snapshots, seeding, back-compatible callers).
         self.runway_ctl = self.runway_ctls[layout.runways[0].name]
         self.monitor = atc_mod.SeparationMonitor()
+
+        # See _analytics_snapshot(): caches the ModelRegistry-backed fields
+        # of status_snapshot() so they're recomputed on a real-time cadence
+        # (ANALYTICS_REFRESH_S), not on every 15 Hz broadcast tick.
+        self._analytics_cache = None
+        self._analytics_cache_wall = 0.0
 
         self.flights = {}
         self._finished_at = {}
@@ -160,8 +168,8 @@ class Aerodrome:
     def local_hour(self):
         """Aerodrome local hour, advancing with the simulation clock. Feeds the
         ML models, which are time-of-day sensitive."""
-        import time as _time
-        base = _time.localtime().tm_hour + _time.localtime().tm_min / 60.0
+        now = time.localtime()
+        base = now.tm_hour + now.tm_min / 60.0
         return (base + self.env.now / 3600.0) % 24
 
     def queue_depth(self):
@@ -408,6 +416,13 @@ class Aerodrome:
         v_max = max(0.6, v_max_kt * KT)
         v_exit = max(0.0, v_exit_kt * KT)
         s = 0.0
+        # s only ever grows over this loop (v is clamped >= 0.35 above, so it
+        # never goes negative) - a PathCursor walks forward from wherever the
+        # last tick left off instead of rescanning the whole (now much
+        # longer, post-smooth_path) polyline from the start every tick. See
+        # PathCursor's docstring for the O(n^2)-per-traversal cost this
+        # avoids.
+        cursor = PathCursor(points)
         while s < total - 0.05:
             remaining = total - s
             v_brake = math.sqrt(max(0.0, v_exit ** 2 + 2 * decel * remaining))
@@ -418,7 +433,7 @@ class Aerodrome:
                 v = max(target, v - decel * STEP_DT)
             v = max(v, 0.35)          # never fully stall mid-leg
             s = min(total, s + v * STEP_DT)
-            pos, brg = point_along_path(points, s)
+            pos, brg = cursor.at(s)
             f["lat"], f["lng"] = pos
             max_turn = MAX_TURN_RATE_DEG_S * STEP_DT
             delta = heading_delta(f["heading"], brg)
@@ -1615,11 +1630,7 @@ class Aerodrome:
             "separation": self.monitor.snapshot(),
             "queue_depth": self.queue_depth(),
             "airborne": self.airborne_count(),
-            "congestion_tier": registry.congestion_tier(len(active), round(avg_risk, 3)),
-            "network_criticality": round(registry.network_criticality(self.layout.icao), 4),
-            "macro_delay_risk": round(registry.predict_macro_delay_risk(), 3),
-            "ground_stop_probability": round(registry.predict_ground_stop_probability(
-                self.weather["visibility_m"], self.weather["ceiling_ft"], self.weather["wind_kt"]), 3),
+            **self._analytics_snapshot(len(active), avg_risk),
             "local_hour": round(self.local_hour(), 2),
             "metrics": {
                 **self.metrics,
@@ -1629,3 +1640,39 @@ class Aerodrome:
             },
             "disruptions": self.active_disruptions,
         }
+
+    def _analytics_snapshot(self, active_count, avg_risk):
+        """The 4 ModelRegistry-backed fields of status_snapshot(), recomputed
+        at most once every ANALYTICS_REFRESH_S of real wall-clock time
+        (independent of TIME_COMPRESSION) rather than on every broadcast tick.
+
+        status_snapshot() is called at STREAM_HZ (15/s) by the real-time
+        broadcast loop in core/main.py. With no .pkl models dropped in, these
+        are cheap statistical fallbacks and recomputing them 15x/sec barely
+        registers - but the whole point of core/models.py's design is that
+        a real trained model can be dropped in at any time with no restart,
+        and once that happens these stop being free: an sklearn/XGBoost
+        .predict() call has real per-call overhead (DataFrame construction,
+        tree traversal), and paying that 4 times, 15 times a second, per
+        connected airport session, is exactly the kind of steady background
+        CPU cost that shows up as everything else feeling less smooth - not
+        because the simulation's own physics got slower, but because this
+        was quietly competing with it for the same interpreter, on every
+        single tick, for values that don't meaningfully change that fast:
+        macro_delay_risk is a same-hour forecast, network_criticality only
+        changes when a .pkl is hot-reloaded via /api/models/reload, and
+        congestion_tier/ground_stop_probability track queue depth and
+        weather, neither of which moves at 15 Hz.
+        """
+        now = time.monotonic()
+        if self._analytics_cache is not None and now - self._analytics_cache_wall < ANALYTICS_REFRESH_S:
+            return self._analytics_cache
+        self._analytics_cache = {
+            "congestion_tier": registry.congestion_tier(active_count, round(avg_risk, 3)),
+            "network_criticality": round(registry.network_criticality(self.layout.icao), 4),
+            "macro_delay_risk": round(registry.predict_macro_delay_risk(), 3),
+            "ground_stop_probability": round(registry.predict_ground_stop_probability(
+                self.weather["visibility_m"], self.weather["ceiling_ft"], self.weather["wind_kt"]), 3),
+        }
+        self._analytics_cache_wall = now
+        return self._analytics_cache
