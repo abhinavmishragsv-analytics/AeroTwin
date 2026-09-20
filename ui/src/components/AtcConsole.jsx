@@ -1,5 +1,9 @@
 import { memo, useState } from "react";
 import CollapseToggle from "./CollapseToggle";
+import {
+  IconCheckCircle, IconCone, IconFog, IconHaze, IconNoEntry,
+  IconOctagonStop, IconSiren, IconStorm, IconWarningTriangle, IconWind,
+} from "./icons";
 /**
  * AtcConsole - the write side of the bi-directional twin. Each button posts
  * a disruption to POST /api/airports/{icao}/disrupt and the live simulation
@@ -7,14 +11,14 @@ import CollapseToggle from "./CollapseToggle";
  * traffic re-routes around a closed taxiway.
  */
 const ACTIONS = [
-  { type: "runway_closure", label: "Runway Closure", minutes: 15, icon: "🚧" },
-  { type: "ground_stop", label: "Ground Stop", minutes: 10, icon: "🛑" },
-  { type: "fog", label: "Fog / Below CAT I", minutes: 20, icon: "🌫️" },
-  { type: "low_visibility", label: "Low Visibility", minutes: 15, icon: "🌁" },
-  { type: "high_wind", label: "High Crosswind", minutes: 15, icon: "💨" },
-  { type: "thunderstorm", label: "Thunderstorm", minutes: 10, icon: "⛈️" },
-  { type: "taxiway_closure", label: "Close Taxiway A", minutes: 10, icon: "🚫", target: "A" },
-  { type: "emergency_arrival", label: "Emergency Arrival", minutes: 0, icon: "🚨" },
+  { type: "runway_closure", label: "Runway Closure", minutes: 15, Icon: IconCone },
+  { type: "ground_stop", label: "Ground Stop", minutes: 10, Icon: IconOctagonStop },
+  { type: "fog", label: "Fog / Below CAT I", minutes: 20, Icon: IconFog },
+  { type: "low_visibility", label: "Low Visibility", minutes: 15, Icon: IconHaze },
+  { type: "high_wind", label: "High Crosswind", minutes: 15, Icon: IconWind },
+  { type: "thunderstorm", label: "Thunderstorm", minutes: 10, Icon: IconStorm },
+  { type: "taxiway_closure", label: "Close Taxiway A", minutes: 10, Icon: IconNoEntry, target: "A" },
+  { type: "emergency_arrival", label: "Emergency Arrival", minutes: 0, Icon: IconSiren },
 ];
 
 function AtcConsole({ onDisrupt, disruptions }) {
@@ -22,7 +26,9 @@ function AtcConsole({ onDisrupt, disruptions }) {
   return (
     <div className={`panel console ${collapsed ? "collapsed" : ""}`}>
       <div className="panel-header">
-        <div className="panel-title warn">⚠ ATC DISRUPTION CONSOLE</div>
+        <div className="panel-title warn">
+          <IconWarningTriangle size={13} className="title-icon" /> ATC DISRUPTION CONSOLE
+        </div>
         <CollapseToggle collapsed={collapsed} onToggle={() => setCollapsed((c) => !c)} />
       </div>
       {!collapsed && (
@@ -34,11 +40,13 @@ function AtcConsole({ onDisrupt, disruptions }) {
                 className="console-btn"
                 onClick={() => onDisrupt(a.type, a.minutes, a.target)}
               >
-                {a.icon} {a.label} {a.minutes > 0 ? `${a.minutes}m` : ""}
+                <a.Icon size={15} className="btn-icon" />
+                <span>{a.label} {a.minutes > 0 ? `${a.minutes}m` : ""}</span>
               </button>
             ))}
             <button className="console-btn clear" onClick={() => onDisrupt("clear", 0)}>
-              ✅ Clear All
+              <IconCheckCircle size={15} className="btn-icon" />
+              <span>Clear All</span>
             </button>
           </div>
           {disruptions?.length > 0 && (

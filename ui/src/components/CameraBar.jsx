@@ -1,9 +1,10 @@
+import { IconGlobe, IconPlane, IconRunway, IconTower } from "./icons";
 /** CameraBar - bottom preset view switcher. */
 const PRESETS = [
-  { id: "orbit", label: "Orbit Airfield", icon: "🌐" },
-  { id: "chase", label: "Chase Aircraft", icon: "✈️" },
-  { id: "tower", label: "ATC Tower Cab", icon: "🗼" },
-  { id: "runway", label: "Runway Cam", icon: "🛬" },
+  { id: "orbit", label: "Orbit Airfield", Icon: IconGlobe },
+  { id: "chase", label: "Chase Aircraft", Icon: IconPlane },
+  { id: "tower", label: "ATC Tower Cab", Icon: IconTower },
+  { id: "runway", label: "Runway Cam", Icon: IconRunway },
 ];
 
 export default function CameraBar({ active, onSelect }) {
@@ -15,7 +16,8 @@ export default function CameraBar({ active, onSelect }) {
           className={`camera-btn ${active === p.id ? "active" : ""}`}
           onClick={() => onSelect(p.id)}
         >
-          {p.icon} {p.label}
+          <p.Icon size={14} className="btn-icon" />
+          <span>{p.label}</span>
         </button>
       ))}
     </div>

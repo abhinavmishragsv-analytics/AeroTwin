@@ -1,5 +1,6 @@
 import { memo, useState } from "react";
 import CollapseToggle from "./CollapseToggle";
+import { IconPause } from "./icons";
 /**
  * FlightStrips - the scrolling telemetry list: callsign, type, status,
  * current clearance, and why an aircraft is holding, if it is. This is the
@@ -53,7 +54,11 @@ function FlightStrips({ flights, selectedId, onSelect }) {
                 )}
               </div>
               {f.cleared_to && <div className="strip-clearance">→ {f.cleared_to}</div>}
-              {f.hold_reason && <div className="strip-hold">⏸ {f.hold_reason}</div>}
+              {f.hold_reason && (
+                <div className="strip-hold">
+                  <IconPause size={11} className="btn-icon" /> {f.hold_reason}
+                </div>
+              )}
             </div>
           ))}
         </div>
