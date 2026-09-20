@@ -353,6 +353,10 @@ class Aerodrome:
             "delay_min": 0.0,
             "approach_attempt": 0,
             "on_ground": True,
+            # Set by _emergency_arrival - lets the frontend pick this aircraft
+            # out of the traffic for a priority halo, instead of the map only
+            # being able to show "an emergency was declared somewhere".
+            "emergency": False,
         }
         return self.flights[fid]
 
@@ -548,10 +552,11 @@ class Aerodrome:
     # =====================================================================
     # Flight lifecycle
     # =====================================================================
-    def operate_arrival(self, ac_type=None, attempt_start=0):
+    def operate_arrival(self, ac_type=None, attempt_start=0, emergency=False):
         """Full arrival, ending either parked (and turned round) or diverted."""
         ac = ac_type or fleet.pick_type(self.layout.fleet_mix, self.rng)
         f = self._new_flight("ARR", ac, ctl=self.assign_runway(ac, "ARR"))
+        f["emergency"] = emergency
         ctl = self.controller_for(f)
         fid = f["id"]
         f["on_ground"] = False
@@ -1569,7 +1574,7 @@ class Aerodrome:
 
     def _emergency_arrival(self):
         ac = fleet.get("A20N")
-        yield self.env.process(self.operate_arrival(ac))
+        yield self.env.process(self.operate_arrival(ac, emergency=True))
 
     # =====================================================================
     # Snapshot for the wire

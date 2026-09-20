@@ -4,6 +4,12 @@ body { font-family: "Inter", system-ui, sans-serif; color: #e6ecf5; }
 
 .app-root { position: relative; width: 100vw; height: 100vh; overflow: hidden; }
 
+/* Screen-space atmosphere (fog, rain+lightning, wind streaks, ground-stop
+   vignette - see lib/weatherFX.js). Sits above the DeckGL/MapLibre canvas
+   but below every UI panel, and never intercepts a click/drag - the map
+   underneath still has to stay fully interactive through the weather. */
+.weather-fx-canvas { position: absolute; inset: 0; z-index: 3; pointer-events: none; }
+
 /* z-index: 25 - must clear .flight-detail-panel (15). Panels in here are
    positioned/z-indexed relative to THIS box (it's a stacking context), so a
    descendant like .violations-popover having a higher z-index than 15 does

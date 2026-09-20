@@ -24,6 +24,7 @@ import "maplibre-gl/dist/maplibre-gl.css";
 
 import { airportViewState, AIRFIELD_LIGHTING_EFFECT, buildAirfieldLayers, towerViewState } from "./lib/airfieldLayers";
 import { buildAircraftLayers } from "./lib/aircraftLayers";
+import { buildDisruptionLayers } from "./lib/disruptionLayers";
 import { fetchAirports, postDisruption, slugFromPath, twinSocketUrl } from "./lib/api";
 import { MotionInterpolator } from "./lib/motionInterpolator";
 import { buildFlightDetails } from "./lib/flightDetails";
@@ -33,6 +34,8 @@ import FlightStrips from "./components/FlightStrips";
 import AtcConsole from "./components/AtcConsole";
 import CameraBar from "./components/CameraBar";
 import WeatherOverlay from "./components/WeatherOverlay";
+import WeatherFX from "./components/WeatherFX";
+import { weatherFxTargets } from "./lib/weatherFX";
 import AirportSwitcher from "./components/AirportSwitcher";
 import FlightDetailPanel from "./components/FlightDetailPanel";
 
@@ -163,6 +166,7 @@ export default function App() {
     let raf;
     const tick = () => {
       const now = performance.now();
+      nowMsRef.current = now;
       const sampled = interpolatorRef.current.sample(now);
       setRenderFlights(sampled);
 
@@ -254,12 +258,38 @@ export default function App() {
     () => buildAircraftLayers(renderFlights, { selectedId: selectedFlightId }),
     [renderFlights, selectedFlightId]
   );
+  const twin = uiFrame?.twin;
+  // Spatial disruptions (closed runway, closed taxiway, the emergency
+  // aircraft) get real deck.gl layers keyed to their actual geometry - see
+  // lib/disruptionLayers.js. `renderFlights` in the deps keeps the
+  // emergency-aircraft halo tracking smoothly at animation-frame rate;
+  // `blinkClock` (a plain incrementing counter, ticked below) drives the
+  // pulse/blink animation independently of that, at a much cheaper 10 Hz -
+  // deliberately not `performance.now()` read directly here, which would be
+  // an impure call during render.
+  const [blinkClock, setBlinkClock] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setBlinkClock((t) => t + 100), 100);
+    return () => clearInterval(id);
+  }, []);
+  const disruptionLayers = useMemo(
+    () => buildDisruptionLayers(layout, twin, renderFlights, blinkClock),
+    [layout, twin, renderFlights, blinkClock]
+  );
   const layers = useMemo(
-    () => [...airfieldLayers, ...aircraftLayers],
-    [airfieldLayers, aircraftLayers]
+    () => [...airfieldLayers, ...aircraftLayers, ...disruptionLayers],
+    [airfieldLayers, aircraftLayers, disruptionLayers]
   );
 
-  const twin = uiFrame?.twin;
+  // Atmospheric effects (fog, rain+lightning, wind streaks, ground-stop
+  // vignette) - see components/WeatherFX.jsx. Derived straight from the
+  // twin's already-combined weather condition, so triggering several
+  // disruptions at once (fog + crosswind + a thunderstorm) shows all three
+  // simultaneously with no extra bookkeeping here.
+  const weatherTargets = useMemo(
+    () => weatherFxTargets(twin?.weather, twin?.ground_stop),
+    [twin?.weather, twin?.ground_stop]
+  );
 
   const homeAirport = useMemo(
     () => airports.find((a) => a.icao === layout?.icao) || null,
@@ -298,6 +328,8 @@ export default function App() {
       >
         <MapLibreMap mapStyle={SATELLITE_STYLE} />
       </DeckGL>
+
+      <WeatherFX targets={weatherTargets} bearing={viewState.bearing} />
 
       <FlightDetailPanel
         flight={selectedRenderFlight || selectedFlight}
