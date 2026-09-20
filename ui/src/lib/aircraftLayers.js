@@ -14,7 +14,7 @@
  * mapping), not something to rederive from scratch.
  */
 import { ScenegraphLayer } from "@deck.gl/mesh-layers";
-import { TextLayer } from "@deck.gl/layers";
+import { ScatterplotLayer, TextLayer } from "@deck.gl/layers";
 
 const STATUS_TINT = {
   hold_short: [255, 210, 160],
@@ -36,6 +36,28 @@ export function buildAircraftLayers(flights, opts = {}) {
   const selectedId = opts.selectedId || null;
 
   const layers = [
+    // Ground shadow, drawn first so the model always renders over it. A
+    // flat dark ellipse straight beneath each aircraft, sized off the same
+    // model_scale driving the glTF itself and fading out with altitude -
+    // a parked or taxiing aircraft with nothing grounding it to the apron
+    // was the single biggest reason the fleet read as "pasted on" rather
+    // than sitting on the pavement.
+    new ScatterplotLayer({
+      id: "aircraft-shadow",
+      data,
+      getPosition: (d) => [d.lng, d.lat, 0.05],
+      getRadius: (d) => (d.model_scale || 1.0) * 16,
+      getFillColor: (d) => {
+        const alt = d.altitude || 0;
+        const alpha = Math.max(0, 1 - alt / 55) * 130;
+        return [10, 10, 12, alpha];
+      },
+      radiusUnits: "meters",
+      stroked: false,
+      filled: true,
+      pickable: false,
+      updateTriggers: { getPosition: data, getFillColor: data },
+    }),
     new ScenegraphLayer({
       id: "aircraft-3d-model",
       data,

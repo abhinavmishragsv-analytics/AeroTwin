@@ -9,27 +9,69 @@
  * disagree, it is a server bug, not a frontend one, which is the point.
  */
 import {
+  AmbientLight,
+  DirectionalLight,
+  LightingEffect,
+} from "@deck.gl/core";
+import {
   PathLayer,
   PolygonLayer,
   ScatterplotLayer,
   TextLayer,
 } from "@deck.gl/layers";
 
+// Real airport pavement isn't a flat, uniformly-saturated fill: aprons are
+// very often poured concrete (noticeably lighter and warmer than asphalt,
+// chosen for fuel/load resistance under parked aircraft), while runways and
+// taxiways are darker, worn asphalt. Modelling that one distinction reads as
+// far more "real" against the satellite basemap than a single grey used
+// everywhere - which is what made the airfield look like a CAD overlay
+// rather than a photographed one.
 const PAVEMENT_COLOR = {
-  runway: [58, 58, 64],
-  shoulder: [46, 46, 52],
-  taxiway: [50, 52, 58],
-  apron: [54, 56, 60],
+  runway: [55, 54, 57],
+  shoulder: [74, 71, 64],
+  taxiway: [63, 62, 64],
+  apron: [121, 118, 109],
 };
 
+// A little per-polygon variation - deterministic, not random noise that
+// would shimmer frame to frame - stands in for the patch repairs, staining
+// and uneven weathering every real apron has and a flat fill can't.
+function jitterColor(base, seedKey) {
+  let h = 0;
+  for (let i = 0; i < seedKey.length; i++) h = (h * 31 + seedKey.charCodeAt(i)) | 0;
+  const spread = ((h >>> 0) % 13) - 6; // -6..+6
+  return base.map((c) => Math.max(0, Math.min(255, c + spread)));
+}
+
+// Real markings are painted white/yellow but read as worn and slightly
+// off-tone from above, not the pure, saturated colors a CAD tool defaults
+// to - pure white in particular looks distinctly synthetic against satellite
+// imagery.
 const PAINT_COLOR = {
-  threshold: [255, 255, 255],
-  aiming: [255, 255, 255],
-  tdz: [255, 255, 255],
-  centerline: [255, 214, 90],
+  threshold: [222, 219, 206],
+  aiming: [222, 219, 206],
+  tdz: [222, 219, 206],
+  centerline: [232, 194, 84],
 };
 
 const BUILDING_HEIGHT_SCALE = 1.0;
+
+// A single consistent "sun" for the whole scene: extruded buildings and the
+// aircraft's PBR model both pick this up automatically once it's passed to
+// DeckGL's `effects` prop (see App.jsx), which is what gives them actual
+// directional shading instead of the flat, shadowless look a plain material
+// fill has. Angled low and from the north-west for a late-afternoon feel -
+// tuned for contrast on building facades and aircraft fuselages, not for
+// astronomical accuracy at any particular airport or time.
+export const AIRFIELD_LIGHTING_EFFECT = new LightingEffect({
+  ambient: new AmbientLight({ color: [255, 250, 240], intensity: 1.35 }),
+  sun: new DirectionalLight({
+    color: [255, 244, 219],
+    intensity: 2.1,
+    direction: [-0.7, -0.6, -1],
+  }),
+});
 
 export function buildAirfieldLayers(layout, opts = {}) {
   if (!layout) return [];
@@ -44,11 +86,19 @@ export function buildAirfieldLayers(layout, opts = {}) {
       id: "pavement",
       data: v.pavement || [],
       getPolygon: (d) => d.polygon,
-      getFillColor: (d) => PAVEMENT_COLOR[d.kind] || [48, 48, 54],
-      getLineWidth: 0,
-      stroked: false,
+      getFillColor: (d, { index }) =>
+        jitterColor(PAVEMENT_COLOR[d.kind] || [48, 48, 54], `${d.kind || ""}-${index}`),
+      // A thin, slightly darker seam between adjoining pavement pieces reads
+      // as the real tar-and-slab joints and patch edges visible in aerial
+      // photos - solid fills with no stroke at all is what made the airfield
+      // look like a single flat sticker laid over the satellite tile.
+      getLineColor: (d) => PAVEMENT_COLOR[d.kind]?.map((c) => Math.max(0, c - 18)) || [30, 30, 34],
+      getLineWidth: 1,
+      lineWidthMinPixels: 1,
+      stroked: true,
       filled: true,
       pickable: false,
+      material: { ambient: 0.6, diffuse: 0.55, shininess: 4, specularColor: [40, 40, 40] },
     })
   );
 
@@ -58,7 +108,7 @@ export function buildAirfieldLayers(layout, opts = {}) {
       id: "paint",
       data: v.paint || [],
       getPolygon: (d) => d.polygon,
-      getFillColor: (d) => PAINT_COLOR[d.kind] || [255, 255, 255],
+      getFillColor: (d) => PAINT_COLOR[d.kind] || [222, 219, 206],
       stroked: false,
       filled: true,
       pickable: false,
@@ -71,7 +121,7 @@ export function buildAirfieldLayers(layout, opts = {}) {
       id: "hold-bars",
       data: v.hold_bars || [],
       getPolygon: (d) => d.polygon,
-      getFillColor: [255, 214, 0],
+      getFillColor: [242, 200, 40],
       stroked: false,
       filled: true,
       pickable: false,
@@ -84,7 +134,7 @@ export function buildAirfieldLayers(layout, opts = {}) {
       id: "stand-marks",
       data: v.stand_marks || [],
       getPolygon: (d) => d.polygon,
-      getFillColor: [255, 255, 255],
+      getFillColor: [222, 219, 206],
       stroked: false,
       filled: true,
       pickable: false,
@@ -115,6 +165,11 @@ export function buildAirfieldLayers(layout, opts = {}) {
       extruded: true,
       wireframe: false,
       pickable: false,
+      // Picked up by AIRFIELD_LIGHTING_EFFECT (see App.jsx's `effects`
+      // prop): without an explicit material, deck.gl's default is nearly
+      // shadowless, which is why buildings previously looked like flat
+      // cut-outs rather than solid extruded volumes.
+      material: { ambient: 0.35, diffuse: 0.75, shininess: 24, specularColor: [60, 60, 60] },
     })
   );
 

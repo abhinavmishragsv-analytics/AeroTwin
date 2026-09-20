@@ -101,12 +101,22 @@ def _vapo():
     # pair put threshold 10 about 550 m from the real pavement and skewed
     # the runway's true bearing off the charted 094 deg, which is what threw
     # every taxiway/apron/stand generated off the actual airport too.
+    #
+    # The generic builder's default offsets are all negative, which places
+    # the whole apron on the side to the LEFT of the 10->28 centreline (the
+    # north side here). Pune's real civil enclave is the opposite: "located
+    # at the western end on the SOUTHERN side of the runway" (the IAF holds
+    # the north side) - so every offset below is positive to mirror the
+    # whole taxiway/apron/terminal complex onto the correct, civil (south)
+    # side, the same fix VEGT needed below.
     return build_airport(
         icao="VAPO", iata="PNQ", name="Pune Airport (Lohegaon)",
         city="Pune", slug="pune",
         thresholds=((18.58306, 73.90639), (18.58139, 73.93028)),
         idents=("10", "28"),
         elevation_m=594.0,
+        taxiway_offset=190.0, apron_lane_offset=280.0,
+        stand_offset=330.0, terminal_offset=395.0,
         n_contact_stands=6, n_remote_stands=4,
         movements_per_hour=14,
         fleet_mix={"A20N": 0.42, "B738": 0.18, "A321": 0.14, "AT76": 0.16, "Q400": 0.10},
@@ -143,9 +153,15 @@ def _vegt():
     # Lokpriya Gopinath Bordoloi International, Guwahati. Runway 02/20, the
     # main gateway to North-East India. Single runway, joint civil/military -
     # and that split is why this one needed more than a threshold fix. The
-    # runway thresholds themselves check out against AIP AD 2.2's ARP offset
-    # (1269 m from the physical beginning of RWY02 on a 27.5 deg bearing),
-    # but the generic builder's default taxiway_offset/apron_lane_offset/
+    # thresholds below are SkyVector's published coordinates (RWY02
+    # N26 05.69/E91 34.78, RWY20 N26 07.24/E91 35.50) - the previous pair
+    # checked out on bearing (22.6 deg, matching the AIP) but had threshold
+    # 20 about 350 m off in latitude, which was enough to visibly skew the
+    # generated taxiway/apron off the real pavement on the satellite
+    # basemap even though the runway's general position and heading looked
+    # roughly right.
+    #
+    # The generic builder's default taxiway_offset/apron_lane_offset/
     # stand_offset/terminal_offset are all negative, which places the whole
     # apron on the LEFT of the 02->20 centreline - the west side, which per
     # Guwahati's own AIC is "Taxiways L1-L4 on the west side... for Military
@@ -156,7 +172,7 @@ def _vegt():
     return build_airport(
         icao="VEGT", iata="GAU", name="Lokpriya Gopinath Bordoloi International Airport",
         city="Guwahati", slug="guwahati",
-        thresholds=((26.09470, 91.58060), (26.11750, 91.59120)),
+        thresholds=((26.094833, 91.579667), (26.120667, 91.591667)),
         idents=("02", "20"),
         elevation_m=49.0, runway_width=46.0,
         taxiway_offset=190.0, apron_lane_offset=280.0,

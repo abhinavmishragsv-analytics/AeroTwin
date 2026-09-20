@@ -22,7 +22,7 @@ import { WebMercatorViewport } from "@deck.gl/core";
 import { Map as MapLibreMap } from "react-map-gl/maplibre";
 import "maplibre-gl/dist/maplibre-gl.css";
 
-import { airportViewState, buildAirfieldLayers, towerViewState } from "./lib/airfieldLayers";
+import { airportViewState, AIRFIELD_LIGHTING_EFFECT, buildAirfieldLayers, towerViewState } from "./lib/airfieldLayers";
 import { buildAircraftLayers } from "./lib/aircraftLayers";
 import { fetchAirports, postDisruption, slugFromPath, twinSocketUrl } from "./lib/api";
 import { MotionInterpolator } from "./lib/motionInterpolator";
@@ -35,6 +35,10 @@ import CameraBar from "./components/CameraBar";
 import WeatherOverlay from "./components/WeatherOverlay";
 import AirportSwitcher from "./components/AirportSwitcher";
 import FlightDetailPanel from "./components/FlightDetailPanel";
+
+// Module-level, not component state: a stable array reference so DeckGL
+// doesn't tear down and reinitialize its lighting effect on every render.
+const DECK_EFFECTS = [AIRFIELD_LIGHTING_EFFECT];
 
 const SATELLITE_STYLE = {
   version: 8,
@@ -289,6 +293,7 @@ export default function App() {
         onViewStateChange={({ viewState: vs }) => setViewState(vs)}
         controller={true}
         layers={layers}
+        effects={DECK_EFFECTS}
         onClick={handleDeckClick}
       >
         <MapLibreMap mapStyle={SATELLITE_STYLE} />
