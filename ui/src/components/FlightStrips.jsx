@@ -1,0 +1,74 @@
+import { memo, useState } from "react";
+import CollapseToggle from "./CollapseToggle";
+import { IconPause } from "./icons";
+/**
+ * FlightStrips - the scrolling telemetry list: callsign, type, status,
+ * current clearance, and why an aircraft is holding, if it is. This is the
+ * one place in the UI where the taxi/runway clearance text produced by
+ * core.routing.TaxiRoute.describe() and the ATC state machine become visible
+ * in plain language, not just position.
+ *
+ * Clicking a strip selects that flight - App.jsx then points the camera at
+ * it and opens the tracking detail panel (see FlightDetailPanel.jsx).
+ */
+const STATUS_LABEL = {
+  scheduled: "SCHEDULED", pushback: "PUSHBACK", taxi_out: "TAXI OUT",
+  hold_short: "HOLD SHORT", lineup: "LINE UP", takeoff_roll: "TAKEOFF ROLL",
+  climb: "CLIMB", inbound: "INBOUND", approach: "APPROACH", holding: "HOLDING",
+  go_around: "GO-AROUND", final: "FINAL", landing_rollout: "ROLLOUT",
+  runway_vacate: "VACATING", taxi_in: "TAXI IN", turnaround: "TURNAROUND",
+  parked: "PARKED", diverted: "DIVERTED",
+};
+
+function FlightStrips({ flights, selectedId, onSelect }) {
+  const [collapsed, setCollapsed] = useState(false);
+  const active = (flights || [])
+    .filter((f) => f.status !== "parked")
+    .sort((a, b) => (a.status === "hold_short") - (b.status === "hold_short"));
+
+  return (
+    <div className={`panel strips ${collapsed ? "collapsed" : ""}`}>
+      <div className="panel-header">
+        <div className="panel-title">ACTIVE FLIGHT TELEMETRY</div>
+        <CollapseToggle collapsed={collapsed} onToggle={() => setCollapsed((c) => !c)} />
+      </div>
+      {!collapsed && (
+        <div className="strips-list">
+          {active.length === 0 && <div className="strips-empty">No active movements</div>}
+          {active.map((f) => (
+            <div
+              key={f.id}
+              className={`strip ${f.id === selectedId ? "strip-selected" : ""}`}
+              onClick={() => onSelect && onSelect(f.id === selectedId ? null : f.id)}
+            >
+              <div className="strip-row1">
+                <span className="callsign">{f.id}</span>
+                <span className="strip-badge">{STATUS_LABEL[f.status] || f.status}</span>
+              </div>
+              <div className="strip-row2">
+                <span>{f.type}</span>
+                <span>{f.speed} kt</span>
+                <span>{Math.round(f.altitude || 0)} m</span>
+                {typeof f.risk === "number" && (
+                  <span className={f.risk > 0.5 ? "risk bad" : "risk"}>Risk: {f.risk.toFixed(2)}</span>
+                )}
+              </div>
+              {f.cleared_to && <div className="strip-clearance">→ {f.cleared_to}</div>}
+              {f.hold_reason && (
+                <div className="strip-hold">
+                  <IconPause size={11} className="btn-icon" /> {f.hold_reason}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+// Memoised: these panels are fed a throttled frame (see App.jsx), so
+// skipping re-render when their props are identical keeps DOM work off the
+// hot path entirely.
+export default memo(FlightStrips);

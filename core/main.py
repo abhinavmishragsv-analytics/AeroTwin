@@ -1,15 +1,21 @@
 """
-AeroTwin VABO Digital Twin - FastAPI Server
-=============================================
-Runs a single, continuous SimPy simulation of Vadodara Airport (VABO) as a
-background task and streams it to any number of connected 3D frontend
-clients over WebSocket. The REST endpoints below are the "write" side of the
-bi-directional twin: posting a disruption here mutates the *one* live
-simulation, and every connected browser sees the effect within one frame.
+AeroTwin Server
+===============
+FastAPI front door for the digital twin.
+
+Multi-airport from here down: each aerodrome gets its own SimPy environment,
+its own ATC and its own WebSocket audience, created lazily the first time
+someone connects to it. `/ws/twin/VABO` and `/ws/twin/VIDP` are two independent,
+simultaneously-running twins, which is what makes the planned `/delhi`,
+`/mumbai` URLs a routing concern in the frontend rather than a rebuild here.
+
+The REST endpoints are the write side of the bi-directional twin: posting a
+disruption mutates the one live simulation for that airport, and every browser
+watching it sees the consequence within a frame - aircraft holding short,
+arrivals going around, traffic re-routing around a closed taxiway.
 """
 import asyncio
 import logging
-import random
 import time
 
 import simpy
@@ -17,17 +23,19 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from core.config import AIRLINE_CODES, AIRPORT_ICAO, BASE_FLIGHT_SPAWN_INTERVAL_S, STREAM_HZ
+from core import airports
+from core.aircraft import FLEET
+from core.config import ARRIVAL_SHARE, DISRUPTION_MAX_MINUTES, STREAM_HZ, TIME_COMPRESSION
 from core.models import registry
-from core.twin_sim import VadodaraAirport
+from core.twin_sim import Aerodrome
 
 logger = logging.getLogger("aerotwin.main")
 logging.basicConfig(level=logging.INFO)
 
 app = FastAPI(
-    title="AeroTwin VABO Digital Twin",
-    description="Vadodara Airport 3D Digital Twin Engine - bi-directional SimPy + ML simulation",
-    version="1.0.0",
+    title="AeroTwin",
+    description="Bi-directional 3D digital twin of Indian airport ground operations",
+    version="2.0.0",
 )
 app.add_middleware(
     CORSMiddleware,
@@ -37,129 +45,272 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Every ~ARRIVAL_EVERY_NTH departure spawn cycle, spawn an arrival instead -
-# keeps single-runway ATC contention visible (arrivals and departures both
-# request the same simpy.Resource in core/twin_sim.py) without overcrowding
-# the small VABO apron.
-ARRIVAL_EVERY_NTH = 3
-REAP_INTERVAL_S = 5.0        # how often (real seconds) to sweep terminal flights
-TERMINAL_MAX_AGE_S = 45.0    # how long an airborne/parked flight lingers before cleanup
+VALID_DISRUPTIONS = {
+    "runway_closure", "maintenance_delay", "ground_stop", "fog", "low_visibility",
+    "high_wind", "wind_shift", "thunderstorm", "taxiway_closure", "emergency_arrival", "clear",
+}
 
 
-class SimulationHub:
-    """Owns the single, always-running SimPy environment and its WebSocket audience."""
+class AirportTwin:
+    """One airport: its SimPy environment, its simulation, its clients."""
 
-    def __init__(self):
+    def __init__(self, icao: str):
+        self.icao = icao
+        self.layout = airports.get_layout(icao)
         self.env = simpy.Environment()
-        self.airport = VadodaraAirport(self.env)
+        self.sim = Aerodrome(self.env, self.layout)
         self.clients: set[WebSocket] = set()
-        self._flight_counter = 101
-        self._spawn_count = 0
-        self._tasks_started = False
+        self._tasks = []
+        self._started = False
+        self._wall_start = time.monotonic()
 
     async def start(self):
-        if self._tasks_started:
+        if self._started:
             return
-        self._tasks_started = True
-        asyncio.create_task(self._flight_generator())
-        asyncio.create_task(self._simulation_loop())
-        logger.info("AeroTwin simulation hub started for %s", AIRPORT_ICAO)
+        self._started = True
+        self._tasks = [
+            asyncio.create_task(self._traffic_generator()),
+            asyncio.create_task(self._clock()),
+        ]
+        logger.info("AeroTwin: %s simulation started", self.icao)
 
-    def _spawn(self, is_arrival: bool):
-        airline_code = random.choice(AIRLINE_CODES)
-        flight_id = f"{airline_code}-{self._flight_counter}"
-        self._flight_counter += 1
-        self._spawn_count += 1
-        if is_arrival:
-            self.env.process(self.airport.land_and_taxi_in(flight_id))
-        else:
-            self.env.process(self.airport.pushback_and_depart(flight_id))
+    async def stop(self):
+        for t in self._tasks:
+            t.cancel()
+        self._tasks = []
+        self._started = False
 
-    async def _flight_generator(self):
-        # Seed the apron with one aircraft immediately so the twin isn't empty on first connect
-        self._spawn(is_arrival=False)
+    # -- traffic -----------------------------------------------------------
+    async def _traffic_generator(self):
+        """Spawn arrivals and departures at the airport's real movement rate.
 
+        Departures mostly come from aircraft already on stand that have turned
+        around; this generator adds arrivals, and tops up departures only when
+        the apron has aircraft sitting idle.
+        """
+        interval_s = 3600.0 / max(1, self.layout.movements_per_hour) / TIME_COMPRESSION
+        await asyncio.sleep(2.0)
         while True:
-            await asyncio.sleep(BASE_FLIGHT_SPAWN_INTERVAL_S)
-            is_arrival = self._spawn_count % ARRIVAL_EVERY_NTH == (ARRIVAL_EVERY_NTH - 1)
-            self._spawn(is_arrival=is_arrival)
+            try:
+                want_arrival = self.sim.rng.random() < ARRIVAL_SHARE
+                if want_arrival and self.sim.accepts_arrival():
+                    self.env.process(self.sim.operate_arrival())
+                elif self.sim.accepts_departure():
+                    # If approach control would not release another inbound
+                    # (spacing, approach saturation, or no stand to park it on),
+                    # the slot goes to a departure instead of manufacturing an
+                    # arrival that will only have to go around - but only if the
+                    # departure queue can actually absorb one. Otherwise the
+                    # slot is simply skipped: an aircraft that would sit on a
+                    # stand for an hour waiting to push back is not traffic,
+                    # it is just a stand taken out of service.
+                    self.env.process(self.sim.operate_departure())
+            except Exception:  # noqa: BLE001
+                logger.exception("traffic generator tick failed")
+            await asyncio.sleep(interval_s)
 
-    async def _simulation_loop(self):
-        """Advance the SimPy clock by a full real-time-mapped window every tick
-        (not a single event), so every concurrently-active aircraft's position
-        gets updated on every broadcast frame instead of taking turns - this is
-        what keeps multi-aircraft motion smooth rather than jittery."""
+    # -- clock -------------------------------------------------------------
+    async def _clock(self):
+        """Advance the SimPy clock in real time and broadcast each frame.
+
+        The clock advances TIME_COMPRESSION simulated seconds per wall second,
+        so every duration inside the model stays a real-world number.
+        """
         period = 1.0 / STREAM_HZ
+        next_tick = time.monotonic() + period
         last_reap = time.monotonic()
         while True:
             try:
-                target_time = self.env.now + period
-                self.env.run(until=target_time)
+                self.env.run(until=self.env.now + period * TIME_COMPRESSION)
+                self.sim.monitor.audit(list(self.sim.flights.values()), self.env.now, self.sim.runway_ctl)
                 await self._broadcast()
-
-                if time.monotonic() - last_reap > REAP_INTERVAL_S:
-                    self.airport.reap_terminal_flights(TERMINAL_MAX_AGE_S)
-                    last_reap = time.monotonic()
+                now = time.monotonic()
+                if now - last_reap > 5.0:
+                    self.sim.reap()
+                    last_reap = now
             except Exception:  # noqa: BLE001
-                # The simulation loop must never die: an uncaught exception here
-                # (e.g. a transient network error mid-broadcast) would otherwise
-                # silently kill the *entire* twin for every connected client
-                # with no crash-visible symptom besides a frozen UI. Log it and
-                # keep ticking instead.
-                logger.exception("Simulation loop tick failed; continuing")
+                # The twin must never die on one bad tick: an uncaught error
+                # here would freeze the airport for every connected client with
+                # no visible symptom beyond a stopped picture.
+                logger.exception("%s simulation tick failed; continuing", self.icao)
 
-            await asyncio.sleep(period)
+            now = time.monotonic()
+            delay = next_tick - now
+            if delay < 0:
+                next_tick = now + period
+                delay = 0.001
+            else:
+                next_tick += period
+            await asyncio.sleep(delay)
+
+    def frame(self):
+        visible = [f for f in self.sim.flights.values() if f["status"] != "despawned"]
+        return {
+            "airport": self.icao,
+            "time": round(self.env.now, 1),
+            "wall_elapsed_s": round(time.monotonic() - self._wall_start, 1),
+            "time_compression": TIME_COMPRESSION,
+            "flights": [{k: v for k, v in f.items() if not k.startswith("_")} for f in visible],
+            "twin": self.sim.status_snapshot(),
+        }
 
     async def _broadcast(self):
         if not self.clients:
             return
-        inactive_states = {"airborne", "parked"}
-        active_flights = [f for f in self.airport.flights.values() if f["status"] not in inactive_states]
-        payload = {
-            "flights": active_flights,
-            "time": round(self.env.now, 1),
-            "airport": AIRPORT_ICAO,
-            "twin": self.airport.status_snapshot(),
-        }
+        payload = self.frame()
         dead = set()
-        # Snapshot with list(...) - self.clients can be mutated concurrently by
-        # a new /ws/twin connection while we're awaiting ws.send_json() below,
-        # and iterating the live set directly raises "Set changed size during
-        # iteration" the moment that happens, which used to crash this whole
-        # loop permanently (see _simulation_loop's try/except above for the
-        # blast-radius fix; this is the actual root cause fix).
+        # Snapshot the client set: a new connection can join mid-await, and
+        # iterating the live set raises "changed size during iteration".
         for ws in list(self.clients):
             try:
                 await ws.send_json(payload)
-            except Exception:  # noqa: BLE001 - client disconnected mid-broadcast
+            except Exception:  # noqa: BLE001 - client vanished mid-send
                 dead.add(ws)
         self.clients -= dead
 
 
-hub = SimulationHub()
+class TwinRegistry:
+    """Twins keyed by airport AND session.
+
+    A page load is its own simulation, starting at T+0. Sharing one long-lived
+    twin per airport meant a reload dropped you into a simulation that had
+    been running for hours - the clock read T+40000s and the apron was already
+    mid-turnaround, which is not what "open the page" should look like.
+
+    A session keeps its twin for as long as the page lives, including while
+    the tab is in the background: the simulation runs server-side, so hidden
+    tabs and throttled browser timers do not pause it, and coming back shows
+    the airport where it actually got to rather than where it was left.
+
+    Abandoned twins are swept after a grace period, so a reload does not leak
+    a simulation per page load, and a brief network blip does not destroy one.
+    """
+
+    GRACE_S = 90.0
+
+    def __init__(self):
+        self._twins: dict[str, AirportTwin] = {}
+        self._empty_since: dict[str, float] = {}
+
+    @staticmethod
+    def _key(icao: str, session: str | None) -> str:
+        return f"{icao.upper()}:{session}" if session else icao.upper()
+
+    async def get(self, icao: str, session: str | None = None) -> AirportTwin:
+        key = self._key(icao, session)
+        if key not in self._twins:
+            self._twins[key] = AirportTwin(icao.upper())
+            await self._twins[key].start()
+        self._empty_since.pop(key, None)
+        return self._twins[key]
+
+    def note_disconnect(self, icao: str, session: str | None):
+        key = self._key(icao, session)
+        twin = self._twins.get(key)
+        if twin is not None and not twin.clients:
+            self._empty_since[key] = time.monotonic()
+
+    async def sweep(self):
+        """Stop and drop twins whose last client left more than GRACE_S ago."""
+        now = time.monotonic()
+        for key, since in list(self._empty_since.items()):
+            twin = self._twins.get(key)
+            if twin is None:
+                self._empty_since.pop(key, None)
+                continue
+            if twin.clients:
+                self._empty_since.pop(key, None)
+                continue
+            if now - since >= self.GRACE_S:
+                await twin.stop()
+                self._twins.pop(key, None)
+                self._empty_since.pop(key, None)
+                logger.info("AeroTwin: swept idle twin %s", key)
+
+    def peek(self, icao: str, session: str | None = None):
+        return self._twins.get(self._key(icao, session))
+
+    def live(self):
+        return {k: len(v.clients) for k, v in self._twins.items()}
+
+
+twins = TwinRegistry()
+
+
+async def _sweeper():
+    while True:
+        await asyncio.sleep(30)
+        try:
+            await twins.sweep()
+        except Exception:  # noqa: BLE001
+            logger.exception("twin sweep failed")
 
 
 @app.on_event("startup")
-async def _on_startup():
-    await hub.start()
+async def _startup():
+    # The default airport is always warm, so the first page load is instant.
+    await twins.get(airports.DEFAULT_ICAO)
+    asyncio.create_task(_sweeper())
 
 
+# ---------------------------------------------------------------------------
+# Discovery
+# ---------------------------------------------------------------------------
 @app.get("/")
 async def root():
     return {
         "status": "online",
-        "airport": AIRPORT_ICAO,
-        "name": "Vadodara Airport 3D Twin",
-        "sim_time_s": round(hub.env.now, 1),
-        "connected_clients": len(hub.clients),
+        "service": "AeroTwin",
+        "version": app.version,
+        "default_airport": airports.DEFAULT_ICAO,
+        "airports": airports.available_icaos(),
+        "live_twins": twins.live(),
+        "time_compression": TIME_COMPRESSION,
     }
 
 
-@app.get("/api/status")
-async def status():
-    return hub.airport.status_snapshot()
+@app.get("/api/airports")
+async def list_airports():
+    """Directory used by the frontend to resolve /delhi, /mumbai, ... to ICAO."""
+    return {"airports": airports.directory(), "default": airports.DEFAULT_ICAO}
 
 
+@app.get("/api/airports/{identifier}/layout")
+async def airport_layout(identifier: str):
+    """Full airfield: runways, taxi graph, stands, and all generated geometry.
+
+    The client draws the airport from this and nothing else, so the picture can
+    never drift from what the simulation believes the airport looks like.
+    """
+    try:
+        icao = airports.resolve(identifier)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"unknown airport {identifier!r}")
+    return airports.layout_to_dict(airports.get_layout(icao))
+
+
+@app.get("/api/airports/{identifier}/status")
+async def airport_status(identifier: str, session: str | None = None):
+    try:
+        icao = airports.resolve(identifier)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"unknown airport {identifier!r}")
+    twin = await twins.get(icao, session)
+    return twin.sim.status_snapshot()
+
+
+@app.get("/api/fleet")
+async def fleet():
+    return {code: {
+        "name": t.name, "wake": t.wake, "category": t.category,
+        "wingspan_m": t.wingspan_m, "length_m": t.length_m, "seats": t.seats,
+        "todr_m": t.todr_m, "approach_speed_kt": t.approach_speed_kt,
+    } for code, t in FLEET.items()}
+
+
+# ---------------------------------------------------------------------------
+# ML model registry
+# ---------------------------------------------------------------------------
 @app.get("/api/models")
 async def models_status():
     return registry.summary()
@@ -167,40 +318,84 @@ async def models_status():
 
 @app.post("/api/models/reload")
 async def models_reload():
-    """Hot-reload .pkl artifacts dropped into core/models/ (e.g. after a Colab training run)."""
+    """Hot-reload .pkl artifacts dropped into core/models/ after a Colab run."""
     return registry.reload()
 
 
+# ---------------------------------------------------------------------------
+# Disruption injection - the write side of the twin
+# ---------------------------------------------------------------------------
 class DisruptionRequest(BaseModel):
-    type: str  # runway_closure | maintenance_delay | ground_stop | fog | high_wind | clear
+    type: str
     duration_minutes: float = 15.0
     label: str | None = None
+    target: str | None = None       # e.g. taxiway name for taxiway_closure
+    # Which page's simulation to mutate. Twins are per-session (see
+    # TwinRegistry), so without this a disruption would land on a different
+    # simulation than the one the person is looking at.
+    session: str | None = None
 
 
-VALID_DISRUPTIONS = {"runway_closure", "maintenance_delay", "ground_stop", "fog", "high_wind", "clear"}
+@app.post("/api/airports/{identifier}/disrupt")
+async def disrupt(identifier: str, req: DisruptionRequest):
+    try:
+        icao = airports.resolve(identifier)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"unknown airport {identifier!r}")
+    if req.type not in VALID_DISRUPTIONS:
+        raise HTTPException(status_code=400, detail=f"type must be one of {sorted(VALID_DISRUPTIONS)}")
+    if not (0 <= req.duration_minutes <= DISRUPTION_MAX_MINUTES):
+        raise HTTPException(
+            status_code=400,
+            detail=f"duration_minutes must be between 0 and {DISRUPTION_MAX_MINUTES}",
+        )
+    twin = await twins.get(icao, req.session)
+    entry = twin.sim.inject_disruption(req.type, req.duration_minutes, req.label, req.target)
+    return {"ok": True, "disruption": entry, "twin": twin.sim.status_snapshot()}
 
 
 @app.post("/api/disrupt")
-async def disrupt(req: DisruptionRequest):
-    if req.type not in VALID_DISRUPTIONS:
-        raise HTTPException(status_code=400, detail=f"type must be one of {sorted(VALID_DISRUPTIONS)}")
-    if not (0 <= req.duration_minutes <= 180):
-        raise HTTPException(status_code=400, detail="duration_minutes must be between 0 and 180")
-    entry = hub.airport.inject_disruption(req.type, req.duration_minutes, req.label)
-    return {"ok": True, "disruption": entry, "twin": hub.airport.status_snapshot()}
+async def disrupt_default(req: DisruptionRequest):
+    """Kept so the older single-airport client keeps working."""
+    return await disrupt(airports.DEFAULT_ICAO, req)
 
 
-@app.websocket("/ws/twin")
-async def twin_stream(websocket: WebSocket):
+# ---------------------------------------------------------------------------
+# Live stream
+# ---------------------------------------------------------------------------
+async def _stream(websocket: WebSocket, icao: str, session: str | None = None):
+    twin = await twins.get(icao, session)
     await websocket.accept()
-    hub.clients.add(websocket)
+    twin.clients.add(websocket)
     try:
+        # Send the layout first so the client can draw the airfield before the
+        # first traffic frame arrives.
+        await websocket.send_json({
+            "kind": "layout",
+            "layout": airports.layout_to_dict(twin.layout),
+        })
+        await websocket.send_json(twin.frame())
         while True:
-            # We don't expect inbound messages, but keep the socket alive and detect disconnects
             await websocket.receive_text()
     except WebSocketDisconnect:
         pass
     except Exception as exc:  # noqa: BLE001
-        logger.info("Twin WebSocket client disconnected: %s", exc)
+        logger.info("%s client disconnected: %s", icao, exc)
     finally:
-        hub.clients.discard(websocket)
+        twin.clients.discard(websocket)
+        twins.note_disconnect(icao, session)
+
+
+@app.websocket("/ws/twin/{identifier}")
+async def twin_stream(websocket: WebSocket, identifier: str, session: str | None = None):
+    try:
+        icao = airports.resolve(identifier)
+    except KeyError:
+        await websocket.close(code=4004)
+        return
+    await _stream(websocket, icao, session)
+
+
+@app.websocket("/ws/twin")
+async def twin_stream_default(websocket: WebSocket, session: str | None = None):
+    await _stream(websocket, airports.DEFAULT_ICAO, session)
