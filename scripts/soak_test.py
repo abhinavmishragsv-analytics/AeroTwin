@@ -78,7 +78,12 @@ def soak(icao, sim_minutes=60, disruptions=(), seed=7):
     period = TIME_COMPRESSION / STREAM_HZ
     while env.now < sim_minutes * 60:
         env.run(until=env.now + period)
-        sim.monitor.audit(list(sim.flights.values()), sim.runway_ctl)
+        # NB: `sim_time` (env.now) must be passed positionally before
+        # `runway_ctl` - omitting it used to silently shift `runway_ctl`
+        # into the `sim_time` slot, which worked fine until an actual
+        # incident occurred and `_log_incident` tried to `round()` a
+        # RunwayController object instead of a number.
+        sim.monitor.audit(list(sim.flights.values()), env.now, sim.runway_ctl)
         sim.reap()
     return sim
 

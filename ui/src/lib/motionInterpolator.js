@@ -37,6 +37,23 @@
  *    - If network packets are delayed and the buffer runs dry, we extrapolate
  *      linearly along the current velocity vector (capped at 250ms), rather
  *      than diverging with a cubic polynomial.
+ *
+ * 6. Output Object Reuse:
+ *    sample() runs every animation frame (up to 60/s) for every tracked
+ *    aircraft. Before this, every single call spread a brand-new object per
+ *    aircraft (`{...raw, lat, lng, ...}`) even for aircraft sitting still on
+ *    a stand - at a busy airport that's dozens of allocations a second doing
+ *    nothing but generating garbage-collector work, and it also meant deck.gl
+ *    saw a "new" aircraft list every frame regardless of whether anything
+ *    had actually moved, forcing it to redo more attribute/buffer work than
+ *    it needed to. `_emit()` below now caches the last output per aircraft
+ *    id and returns that exact same reference when every value that would
+ *    go into a new object (position, orientation, speed, and the underlying
+ *    `raw` telemetry reference) is unchanged from last call - which for a
+ *    parked or holding aircraft is every call until it actually moves again.
+ *    Moving aircraft are unaffected: their lat/lng change every tick by
+ *    construction, so the cache check fails and a fresh object is produced,
+ *    exactly as before.
  */
 
 const HISTORY_LEN = 8;
@@ -58,10 +75,14 @@ function lerp(a, b, t) {
 export class MotionInterpolator {
   constructor() {
     this.histories = new Map(); // id -> [{t, lat, lng, altitude, heading, pitch, roll, raw}]
+    // id -> the last object sample() produced for it, plus the exact inputs
+    // that produced it - see section 6 of the file doc comment above.
+    this.lastSampled = new Map();
   }
 
   reset() {
     this.histories.clear();
+    this.lastSampled.clear();
   }
 
   /** Record a broadcast frame's flights at wall-clock time `atMs`. */
@@ -97,8 +118,38 @@ export class MotionInterpolator {
     for (const id of this.histories.keys()) {
       if (!seen.has(id)) {
         this.histories.delete(id);
+        this.lastSampled.delete(id);
       }
     }
+  }
+
+  /**
+   * Return the cached output object for `id` if every value that would go
+   * into a freshly-spread object is identical to last call, otherwise build
+   * and cache a new one. `raw` is compared by reference (a new one only
+   * ever arrives via ingest(), at STREAM_HZ, not every rAF tick), the rest
+   * by value - IEEE-754 arithmetic is deterministic, so the same inputs to
+   * the interpolation math above always produce bit-identical outputs and
+   * this can never falsely reuse a stale frame.
+   */
+  _emit(id, raw, lat, lng, altitude, heading, pitch, roll, speed) {
+    const cached = this.lastSampled.get(id);
+    if (
+      cached &&
+      cached.raw === raw &&
+      cached.lat === lat &&
+      cached.lng === lng &&
+      cached.altitude === altitude &&
+      cached.heading === heading &&
+      cached.pitch === pitch &&
+      cached.roll === roll &&
+      cached.speed === speed
+    ) {
+      return cached.output;
+    }
+    const output = { ...raw, lat, lng, altitude, heading, pitch, roll, speed };
+    this.lastSampled.set(id, { raw, lat, lng, altitude, heading, pitch, roll, speed, output });
+    return output;
   }
 
   /** Sample every tracked aircraft's smoothed state at wall-clock time `atMs`. */
@@ -106,22 +157,13 @@ export class MotionInterpolator {
     const renderTime = atMs - INTERPOLATION_DELAY_MS;
     const out = [];
 
-    for (const h of this.histories.values()) {
+    for (const [id, h] of this.histories.entries()) {
       if (h.length === 0) continue;
 
       // Single snapshot: return as-is
       if (h.length === 1) {
         const s = h[0];
-        out.push({
-          ...s.raw,
-          lat: s.lat,
-          lng: s.lng,
-          altitude: s.altitude,
-          heading: s.heading,
-          pitch: s.pitch,
-          roll: s.roll,
-          speed: s.speed,
-        });
+        out.push(this._emit(id, s.raw, s.lat, s.lng, s.altitude, s.heading, s.pitch, s.roll, s.speed));
         continue;
       }
 
@@ -130,16 +172,9 @@ export class MotionInterpolator {
 
       // Case A: Render time is earlier than the earliest buffered packet
       if (renderTime <= first.t) {
-        out.push({
-          ...first.raw,
-          lat: first.lat,
-          lng: first.lng,
-          altitude: first.altitude,
-          heading: first.heading,
-          pitch: first.pitch,
-          roll: first.roll,
-          speed: first.speed,
-        });
+        out.push(this._emit(
+          id, first.raw, first.lat, first.lng, first.altitude, first.heading, first.pitch, first.roll, first.speed
+        ));
         continue;
       }
 
@@ -155,16 +190,7 @@ export class MotionInterpolator {
         const lng = last.lng + (last.lng - prev.lng) * rate;
         const altitude = Math.max(0, last.altitude + (last.altitude - prev.altitude) * rate);
 
-        out.push({
-          ...last.raw,
-          lat,
-          lng,
-          altitude,
-          heading: last.heading,
-          pitch: last.pitch,
-          roll: last.roll,
-          speed: last.speed,
-        });
+        out.push(this._emit(id, last.raw, lat, lng, altitude, last.heading, last.pitch, last.roll, last.speed));
         continue;
       }
 
@@ -187,16 +213,7 @@ export class MotionInterpolator {
       const dlng = b.lng - a.lng;
       const distSq = dlat * dlat + dlng * dlng;
       if (distSq < 1e-10) {
-        out.push({
-          ...b.raw,
-          lat: a.lat,
-          lng: a.lng,
-          altitude: a.altitude,
-          heading: a.heading,
-          pitch: a.pitch,
-          roll: a.roll,
-          speed: 0,
-        });
+        out.push(this._emit(id, b.raw, a.lat, a.lng, a.altitude, a.heading, a.pitch, a.roll, 0));
         continue;
       }
 
@@ -234,16 +251,7 @@ export class MotionInterpolator {
       const roll = lerp(a.roll, b.roll, u);
       const speed = Math.round(lerp(a.speed || 0, b.speed || 0, u));
 
-      out.push({
-        ...b.raw,
-        lat,
-        lng,
-        altitude,
-        heading,
-        pitch,
-        roll,
-        speed,
-      });
+      out.push(this._emit(id, b.raw, lat, lng, altitude, heading, pitch, roll, speed));
     }
 
     return out;

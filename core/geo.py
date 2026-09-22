@@ -105,7 +105,14 @@ def path_length_m(points) -> float:
 def point_along_path(points, distance):
     """Position and heading at `distance` metres along a polyline.
 
-    Returns (point, heading). Clamps to the ends.
+    Returns (point, heading). Clamps to the ends. Walks from the start of
+    the polyline every call - fine for one-off lookups, but `_traverse()`
+    (core/twin_sim.py) calls this once per physics tick with a `distance`
+    that only ever increases over a route's lifetime, which turned this
+    into an O(n) rescan of already-passed segments on every single tick -
+    by far the single largest cost in the whole simulation by profile. Use
+    `cumulative_lengths()` + `point_along_path_from()` instead for that
+    access pattern.
     """
     if distance <= 0:
         return points[0], bearing_deg(points[0], points[1])
@@ -119,6 +126,53 @@ def point_along_path(points, distance):
             return interpolate(points[i], points[i + 1], t), bearing_deg(points[i], points[i + 1])
         travelled += seg
     return points[-1], bearing_deg(points[-2], points[-1])
+
+
+def cumulative_lengths(points):
+    """Cumulative distance (metres) to each point of a polyline; cum[0] == 0,
+    cum[-1] == the polyline's total length. Precompute this once for a fixed
+    route and reuse it across every call to `point_along_path_from()` below,
+    instead of re-deriving each segment's length from scratch every tick.
+    """
+    cum = [0.0]
+    total = 0.0
+    for i in range(len(points) - 1):
+        total += distance_m(points[i], points[i + 1])
+        cum.append(total)
+    return cum
+
+
+def point_along_path_from(points, cum, distance, start_index=0):
+    """Like `point_along_path`, but for a fixed route walked with a
+    monotonically increasing `distance` over many calls (exactly what
+    `_traverse()` does every physics tick): takes the polyline's
+    precomputed `cumulative_lengths()` and the segment index the previous
+    call landed on, and only looks at segments from there onward instead of
+    rescanning the whole route.
+
+    Returns (point, heading, index) - pass `index` back in as `start_index`
+    next call. Safe (if slightly slower) even if `distance` isn't strictly
+    increasing: it searches outward from `start_index` in whichever
+    direction is needed rather than assuming forward-only motion.
+    """
+    n = len(points)
+    if n < 2:
+        return points[0], 0.0, 0
+    if distance <= 0:
+        return points[0], bearing_deg(points[0], points[1]), 0
+    total = cum[-1]
+    if distance >= total:
+        return points[-1], bearing_deg(points[-2], points[-1]), n - 2
+
+    i = max(0, min(start_index, n - 2))
+    while i > 0 and cum[i] > distance:
+        i -= 1
+    while i < n - 2 and cum[i + 1] <= distance:
+        i += 1
+
+    seg = cum[i + 1] - cum[i]
+    t = 0.0 if seg <= 1e-9 else (distance - cum[i]) / seg
+    return interpolate(points[i], points[i + 1], t), bearing_deg(points[i], points[i + 1]), i
 
 
 def smooth_path(points, spacing_m=6.0, alpha=0.5):

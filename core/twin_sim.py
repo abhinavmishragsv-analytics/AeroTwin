@@ -60,13 +60,13 @@ from core.config import (
 )
 from core.geo import (
     bearing_deg,
+    cumulative_lengths,
     destination,
     distance_m,
     heading_delta,
     interpolate,
     lerp_heading,
-    path_length_m,
-    point_along_path,
+    point_along_path_from,
     smooth_path,
 )
 from core.models import registry
@@ -401,13 +401,21 @@ class Aerodrome:
         # every original waypoint, so nothing downstream (hold bars, runway
         # thresholds) moves.
         points = smooth_path(points)
-        total = path_length_m(points)
+        # Precomputed once for this route, then walked forward with a cursor
+        # (`idx` below) rather than re-scanning from the start every tick -
+        # `s` only ever increases over the life of this generator, so by far
+        # most of the cost of the old point_along_path() call here was
+        # re-deriving the distance to every already-passed segment, tick
+        # after tick, for the whole length of every taxi and approach leg.
+        cum = cumulative_lengths(points)
+        total = cum[-1]
         if total <= 0.5:
             return
         v = max(0.0, v_entry_kt * KT)
         v_max = max(0.6, v_max_kt * KT)
         v_exit = max(0.0, v_exit_kt * KT)
         s = 0.0
+        idx = 0
         while s < total - 0.05:
             remaining = total - s
             v_brake = math.sqrt(max(0.0, v_exit ** 2 + 2 * decel * remaining))
@@ -418,7 +426,7 @@ class Aerodrome:
                 v = max(target, v - decel * STEP_DT)
             v = max(v, 0.35)          # never fully stall mid-leg
             s = min(total, s + v * STEP_DT)
-            pos, brg = point_along_path(points, s)
+            pos, brg, idx = point_along_path_from(points, cum, s, idx)
             f["lat"], f["lng"] = pos
             max_turn = MAX_TURN_RATE_DEG_S * STEP_DT
             delta = heading_delta(f["heading"], brg)
