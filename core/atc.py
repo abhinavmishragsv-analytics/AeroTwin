@@ -485,9 +485,28 @@ class SeparationMonitor:
         self._active_pairs = current_pairs
 
         if runway_controller is not None:
-            on_runway = [f for f in flights
-                         if f.get("status") in ("lineup", "takeoff_roll", "landing_rollout", "touchdown")]
-            if len(on_runway) > 1:
+            # Group by which runway each aircraft is actually using, not
+            # "is this aircraft anywhere on any runway at this airport" -
+            # the previous version flagged ANY two aircraft simultaneously
+            # in a runway-occupying status as an incursion regardless of
+            # which runway each was on, which is a false positive at every
+            # multi-runway airport: two aircraft safely using two
+            # different, non-conflicting runways at once is normal
+            # operation (Delhi genuinely runs all 4 of its runways
+            # concurrently), not a conflict. Runways that physically cross
+            # (see Aerodrome.__init__'s _runways_intersect grouping) already
+            # share one SimPy resource with capacity 1, so two aircraft can
+            # never actually be simultaneously "on" both of those anyway -
+            # grouping by name here just has to not manufacture a false
+            # alarm out of two aircraft on two unrelated, independent
+            # runways.
+            by_runway = {}
+            for f in flights:
+                if f.get("status") not in ("lineup", "takeoff_roll", "landing_rollout", "touchdown"):
+                    continue
+                key = f.get("runway_name") or f.get("id")
+                by_runway[key] = by_runway.get(key, 0) + 1
+            if any(count > 1 for count in by_runway.values()):
                 self.runway_incursions += 1
 
     def _log_incident(self, kind, a, b, distance, sim_time, min_required_m, vertical_m=None):

@@ -108,6 +108,37 @@ class Aerodrome:
         self.runway_ctl = self.runway_ctls[layout.runways[0].name]
         self.monitor = atc_mod.SeparationMonitor()
 
+        # Runways close enough together and similarly enough aligned that two
+        # aircraft climbing out at once could converge during the vulnerable
+        # early climb - not just literally crossing (that's the resource-
+        # sharing above), but genuinely near-parallel and near each other,
+        # which is what real Delhi's published "simultaneous departures are
+        # not permitted from RWY 27 and RWY 28" (and similar pairs) rules are
+        # protecting against. The twin doesn't have Delhi's exact mode-of-
+        # operation table, so this groups runways by the same kind of
+        # geometric test _runways_intersect already uses rather than
+        # hardcoding per-airport runway names - see _claim_climbout below for
+        # where the group actually gets serialised.
+        climb_groups = []  # list[set[runway name]]
+        for rwy in layout.runways:
+            matches = [g for g in climb_groups
+                       if any(self._runways_climb_conflict(rwy, self.runway_ctls[n].runway) for n in g)]
+            if matches:
+                merged = {rwy.name}
+                for g in matches:
+                    merged |= g
+                    climb_groups.remove(g)
+                climb_groups.append(merged)
+            else:
+                climb_groups.append({rwy.name})
+        self._runway_climb_group = {}
+        self._climb_claim = {}
+        for g in climb_groups:
+            key = frozenset(g)
+            self._climb_claim[key] = None
+            for name in g:
+                self._runway_climb_group[name] = key
+
         self.flights = {}
         self._finished_at = {}
         self._counter = 100
@@ -227,6 +258,50 @@ class Aerodrome:
                                   r2.ends[0].threshold, r2.ends[1].threshold,
                                   r1.ends[0].threshold)
 
+    @staticmethod
+    def _runways_climb_conflict(r1, r2):
+        """Whether departures off these two runways could converge during
+        the early climb-out: near-parallel headings (within 30 deg of each
+        other, either direction) AND close enough together (centreline-to-
+        centreline within 5 km) - a proxy for "the same runway complex",
+        not a precise reproduction of any specific airport's real
+        separation minima. See __init__'s climb_groups build-up above for
+        how this result is used.
+        """
+        if r1.name == r2.name:
+            return False
+        h1 = bearing_deg(r1.ends[0].threshold, r1.ends[1].threshold)
+        h2 = bearing_deg(r2.ends[0].threshold, r2.ends[1].threshold)
+        # Normalise to "how far from parallel", 0-90 deg, independent of
+        # which direction either runway's ends happen to be listed in.
+        alignment_diff = abs(((h1 - h2 + 90) % 180) - 90)
+        if alignment_diff > 30:
+            return False
+        len1 = distance_m(r1.ends[0].threshold, r1.ends[1].threshold)
+        mid1 = destination(r1.ends[0].threshold, h1, len1 / 2)
+        d = distance_m(mid1, r2.ends[0].threshold)
+        if d < 1e-6:
+            return True
+        brg = bearing_deg(r2.ends[0].threshold, mid1)
+        lateral_m = abs(d * math.sin(math.radians(brg - h2)))
+        return lateral_m < 5000.0
+
+    def _claim_climbout(self, ctl, fid):
+        """Take the shared early-climb corridor for this runway's near-
+        parallel group (see __init__). Same single-owner design as
+        _claim_final: no one else may hold it until explicitly released.
+        """
+        key = self._runway_climb_group[ctl.runway.name]
+        if self._climb_claim[key] in (None, fid):
+            self._climb_claim[key] = fid
+            return True
+        return False
+
+    def _release_climbout(self, ctl, fid):
+        key = self._runway_climb_group[ctl.runway.name]
+        if self._climb_claim[key] == fid:
+            self._climb_claim[key] = None
+
     def assign_runway(self, ac, role):
         """Pick a runway for this aircraft.
 
@@ -250,9 +325,24 @@ class Aerodrome:
             usable.append(ctl)
         if not usable:
             return self.runway_ctl
-        # Least-loaded first: queued departures plus sequenced arrivals.
-        return min(usable, key=lambda c: len(c.departure_queue) + len(c.arrival_sequence)
-                   + len(c.resource.queue))
+        # Least-loaded first: queued departures plus sequenced arrivals. Ties
+        # are the common case - upstream arrival/departure pacing rarely
+        # lets more than one aircraft need a runway at the same instant, so
+        # every runway usually sits at zero - and min() breaking ties by
+        # picking whichever came first in self.runway_ctls' iteration order
+        # meant a lightly-loaded multi-runway airport never actually used
+        # its other runways: Delhi's real 4 runways operate concurrently
+        # (that's the whole point of having four - see e.g. the fog-season
+        # capacity gain from running all of them at once), but the twin was
+        # putting the large majority of movements on the first-listed runway
+        # and none at all on two of the other three. Break ties with the
+        # same seeded RNG the rest of the sim already uses, so equally-idle
+        # runways take turns instead of the same one winning every time,
+        # while a runway that's genuinely busier is still correctly skipped.
+        loads = [len(c.departure_queue) + len(c.arrival_sequence) + len(c.resource.queue) for c in usable]
+        best = min(loads)
+        tied = [c for c, load in zip(usable, loads) if load == best]
+        return tied[0] if len(tied) == 1 else self.rng.choice(tied)
 
     def controller_for(self, f):
         """The runway controller this flight is operating on."""
@@ -1279,6 +1369,24 @@ class Aerodrome:
             waited += 30
             f["hold_reason"] = f"number {ctl.departure_queue.index(fid) + 1 if fid in ctl.departure_queue else 1} for departure"
             yield self.env.timeout(1)
+
+        # This runway's own resource (just granted above) only keeps two
+        # aircraft off the SAME runway at once. Runways close together and
+        # near-parallel enough to be in the same climb group (see __init__)
+        # need a second, shared claim too: without it, two aircraft cleared
+        # for takeoff on two different but nearby runways at almost the same
+        # moment can both be airborne and climbing out at the same time,
+        # on converging tracks - which is exactly what happened at VIDP
+        # right after a runway reopened from closure and released a backlog
+        # of departures onto multiple runways at once (299.5 m lateral,
+        # 11.8 m vertical - both well under minima). _release_climbout below
+        # lets it go again once this aircraft has climbed and turned enough
+        # to have genuinely diverged, not just once it's off the runway.
+        climbout_claimed = False
+        while not self._claim_climbout(ctl, fid):
+            yield self.env.timeout(5)
+        climbout_claimed = True
+
         gap = ctl.separation_wait_s(ac, "DEP")
         entry_id = self._runway_entry_for(hold_node)
         entry = self.layout.nodes[entry_id]
@@ -1322,6 +1430,7 @@ class Aerodrome:
         dep_fix = destination(dep_fix, (end.heading_deg + 25) % 360, 2600)
         climb_rate_ms = ac.climb_rate_fpm * FPM
         released = {"done": False}
+        climb_released = {"done": False}
 
         def _release_when_clear(progress, s, total):
             if not released["done"] and s > 900:
@@ -1329,6 +1438,14 @@ class Aerodrome:
                 ctl.vacate(fid, ac, "DEP")
                 ctl.resource.release(req)
                 self.ground.release_all(fid)
+            # Held longer than the runway itself: the runway is clear once
+            # the aircraft is 900 m down the departure leg, but the shared
+            # climb corridor (see _claim_climbout) needs the aircraft to
+            # have actually turned and climbed enough to be diverging from
+            # a nearby runway's departure path too, not just off the ground.
+            if climbout_claimed and not climb_released["done"] and s > 3200:
+                climb_released["done"] = True
+                self._release_climbout(ctl, fid)
 
         yield from self._traverse(
             f, [rotate_point, dep_fix], ac.v_rotate_kt, ac.climb_speed_kt, ac.climb_speed_kt,
@@ -1341,6 +1458,8 @@ class Aerodrome:
             ctl.vacate(fid, ac, "DEP")
             ctl.resource.release(req)
             self.ground.release_all(fid)
+        if climbout_claimed and not climb_released["done"]:
+            self._release_climbout(ctl, fid)
 
         self.stands.vacate(fid)
         self.metrics["departures"] += 1
