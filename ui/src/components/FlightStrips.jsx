@@ -1,6 +1,6 @@
 import { memo, useState } from "react";
 import CollapseToggle from "./CollapseToggle";
-import { IconPause } from "./icons";
+import { IconPause, IconTelemetry } from "./icons";
 /**
  * FlightStrips - the scrolling telemetry list: callsign, type, status,
  * current clearance, and why an aircraft is holding, if it is. This is the
@@ -20,7 +20,7 @@ const STATUS_LABEL = {
   parked: "PARKED", diverted: "DIVERTED",
 };
 
-function FlightStrips({ flights, selectedId, onSelect }) {
+function FlightStrips({ flights, selectedId, onSelect, onOpenTelemetry }) {
   const [collapsed, setCollapsed] = useState(false);
   const active = (flights || [])
     .filter((f) => f.status !== "parked")
@@ -43,7 +43,19 @@ function FlightStrips({ flights, selectedId, onSelect }) {
             >
               <div className="strip-row1">
                 <span className="callsign">{f.id}</span>
-                <span className="strip-badge">{STATUS_LABEL[f.status] || f.status}</span>
+                <span className="strip-right">
+                  <span className="strip-badge">{STATUS_LABEL[f.status] || f.status}</span>
+                  {onOpenTelemetry && (f.direction === "ARR" || f.direction === "DEP") && (
+                    <button
+                      className="strip-tm-btn"
+                      title={`Live telemetry for ${f.id} (${f.direction === "ARR" ? "arrival" : "departure"})`}
+                      aria-label={`Live telemetry for ${f.id}`}
+                      onClick={(e) => { e.stopPropagation(); onOpenTelemetry(`${f.id}:${f.direction}`); }}
+                    >
+                      <IconTelemetry size={12} />
+                    </button>
+                  )}
+                </span>
               </div>
               <div className="strip-row2">
                 <span>{f.type}</span>

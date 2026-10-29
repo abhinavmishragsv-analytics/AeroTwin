@@ -182,3 +182,23 @@ body { font-family: "Inter", system-ui, sans-serif; color: #e6ecf5; }
 .fdp-grid { margin-top: 10px; display: grid; grid-template-columns: 1fr 1fr; gap: 7px 10px; }
 .fdp-row-label { font-size: 9px; letter-spacing: 0.05em; opacity: 0.55; text-transform: uppercase; display: block; }
 .fdp-row-value { font-size: 12px; font-weight: 600; display: block; margin-top: 1px; }
+
+/* --- Telemetry entry points ------------------------------------------ */
+.top-right-row { display: flex; gap: 8px; align-items: stretch; }
+.top-right-row .airport-switcher { flex: 1; min-width: 0; }
+.telemetry-launch {
+  display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0;
+  background: linear-gradient(135deg, rgba(77,163,255,0.22), rgba(52,211,153,0.16));
+  color: #cfe6ff; border: 1px solid rgba(77,163,255,0.45); border-radius: 10px;
+  padding: 8px 12px; font-size: 12px; font-weight: 700; letter-spacing: 0.02em; cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, transform 0.1s;
+}
+.telemetry-launch:hover { background: linear-gradient(135deg, rgba(77,163,255,0.38), rgba(52,211,153,0.26)); border-color: rgba(120,200,255,0.8); }
+.telemetry-launch:active { transform: translateY(1px); }
+.strip-right { display: inline-flex; align-items: center; gap: 6px; }
+.strip-tm-btn {
+  display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; padding: 0;
+  border-radius: 6px; border: 1px solid rgba(77,163,255,0.35); background: rgba(77,163,255,0.12);
+  color: #78c8ff; cursor: pointer; transition: background 0.15s;
+}
+.strip-tm-btn:hover { background: rgba(77,163,255,0.38); color: #fff; }

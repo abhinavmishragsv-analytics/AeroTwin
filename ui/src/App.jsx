@@ -25,7 +25,7 @@ import "maplibre-gl/dist/maplibre-gl.css";
 import { airportViewState, AIRFIELD_LIGHTING_EFFECT, buildAirfieldLayers, towerViewState } from "./lib/airfieldLayers";
 import { buildAircraftLayers } from "./lib/aircraftLayers";
 import { buildDisruptionLayers } from "./lib/disruptionLayers";
-import { fetchAirports, postDisruption, slugFromPath, twinSocketUrl } from "./lib/api";
+import { fetchAirports, openTelemetry, postDisruption, slugFromPath, twinSocketUrl } from "./lib/api";
 import { MotionInterpolator } from "./lib/motionInterpolator";
 import { buildFlightDetails } from "./lib/flightDetails";
 
@@ -38,6 +38,7 @@ import WeatherFX from "./components/WeatherFX";
 import { weatherFxTargets } from "./lib/weatherFX";
 import AirportSwitcher from "./components/AirportSwitcher";
 import FlightDetailPanel from "./components/FlightDetailPanel";
+import { IconTelemetry } from "./components/icons";
 
 // Module-level, not component state: a stable array reference so DeckGL
 // doesn't tear down and reinitialize its lighting effect on every render.
@@ -348,11 +349,21 @@ export default function App() {
           flights={uiFrame?.flights || []}
           selectedId={selectedFlightId}
           onSelect={handleSelectFlight}
+          onOpenTelemetry={(legId) => openTelemetry(layout?.slug || identifier, { leg: legId })}
         />
       </div>
 
       <div className="overlay top-right">
-        <AirportSwitcher airports={airports} current={layout?.slug} />
+        <div className="top-right-row">
+          <AirportSwitcher airports={airports} current={layout?.slug} />
+          <button
+            className="telemetry-launch"
+            onClick={() => openTelemetry(layout?.slug || identifier)}
+            title="Open the flight telemetry analysis in a new tab"
+          >
+            <IconTelemetry size={15} className="btn-icon" /> Telemetry
+          </button>
+        </div>
         <WeatherOverlay
           weather={twin?.weather}
           windAssessment={twin?.wind}

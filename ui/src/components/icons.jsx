@@ -174,3 +174,14 @@ export function IconPause({ size = 16, className }) {
     </svg>
   );
 }
+
+export function IconTelemetry({ size = 16, className }) {
+  return (
+    <svg {...base(size)} className={className}>
+      <path d="M3 20h18" />
+      <path d="M3 20V4" />
+      <path d="M6.5 15l3.4-4.6 3 2.6 4.6-7" />
+      <circle cx="17.5" cy="6" r="1.2" />
+    </svg>
+  );
+}

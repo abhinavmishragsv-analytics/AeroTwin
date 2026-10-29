@@ -59,6 +59,38 @@ taxiway.
   present the registry falls back to a documented heuristic, so the twin runs
   standalone.
 
+## Flight telemetry
+
+Every aircraft is recorded once per simulated second by a flight-data recorder
+(`core/telemetry.py`) and can be analysed in its own page, opened from the
+**Telemetry** button on the map (all completed legs) or from the small chart
+icon on any row of *Active Flight Telemetry* (that flight, live).
+
+- **Arrivals and departures are separate.** One aircraft produces two *legs*,
+  `6E-142:ARR` and `6E-142:DEP`. The page has one tab for each and only lets you
+  overlay legs of the same direction (up to six), because an approach and a
+  take-off share no phases, x axis or KPIs.
+- **Alignment.** Overlay by time since the leg began, by an event (touchdown,
+  1000/500 ft gates, brake release, rotation, lift-off) or by distance along the
+  runway - with the 3 degree glideslope drawn for arrivals.
+- **Channels.** About 35, grouped (speed, flight path, attitude, loads,
+  approach, wind, engines, fuel and weight, configuration, brakes, risk), each
+  tagged `sim` (read from the simulation), `derived` (computed from the
+  simulated motion) or `model` (plausible engineering values the simulation does
+  not compute: N1/EGT, fuel flow, weights, flaps/gear, brake temperature). Model
+  channels are deterministic per leg and representative, not type-certified.
+- **KPIs.** Arrivals: stabilised-approach gates, touchdown speed/sink/load,
+  rollout, runway occupancy, taxi-in. Departures: pushback, taxi-out, hold
+  time, take-off roll, lift-off speed, climb rate. Best and worst values are
+  highlighted when comparing.
+- **API.** `GET /api/airports/{id}/telemetry/legs?session=&direction=ARR|DEP&state=`,
+  `GET .../telemetry/legs/{leg}`, `GET /api/telemetry/schema` and
+  `WS /ws/telemetry/{id}?session=` (live tail). The telemetry page attaches to
+  the simulation of the map tab that opened it through the `session` id in its
+  URL; twins are per page load.
+
+Tests: `python -m pytest tests -q` (recorder, plus one test per disruption).
+
 ## Why it doesn't collide
 
 Ground and runway conflicts are prevented by construction, not by tuning:

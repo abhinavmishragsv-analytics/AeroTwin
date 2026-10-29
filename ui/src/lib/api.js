@@ -26,6 +26,11 @@ export function slugFromPath() {
   return seg || null;
 }
 
+/** True on /<airport>/telemetry. No router library: the app has two pages. */
+export function isTelemetryPath() {
+  return window.location.pathname.split("/").filter(Boolean)[1] === "telemetry";
+}
+
 export async function fetchAirports() {
   const res = await fetch(`${API_BASE}/api/airports`);
   if (!res.ok) throw new Error(`GET /api/airports failed: ${res.status}`);
@@ -50,6 +55,52 @@ export async function postDisruption(identifier, body) {
 
 export function twinSocketUrl(identifier) {
   return `${WS_BASE}/ws/twin/${identifier}?session=${encodeURIComponent(SESSION_ID)}`;
+}
+
+/** Path of the telemetry page for an airport. Passing the session id is what
+ *  lets the new tab read the SAME simulation this tab is showing - twins are
+ *  per-session (see core/main.py TwinRegistry), so without it the telemetry
+ *  page would look at a different, empty airport. */
+export function telemetryUrl(slug, { leg } = {}) {
+  const q = new URLSearchParams({ session: SESSION_ID });
+  if (leg) q.set("leg", leg);
+  return `/${slug}/telemetry?${q.toString()}`;
+}
+
+export function openTelemetry(slug, opts) {
+  window.open(telemetryUrl(slug, opts), "_blank", "noopener");
+}
+
+export async function fetchTelemetryLegs(identifier, session, direction, state = "all") {
+  const q = new URLSearchParams({ state });
+  if (session) q.set("session", session);
+  if (direction) q.set("direction", direction);
+  const res = await fetch(`${API_BASE}/api/airports/${identifier}/telemetry/legs?${q}`);
+  if (!res.ok) throw new Error(res.status === 404 ? "session_not_found" : `telemetry legs failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchTelemetryLeg(identifier, session, legId) {
+  const q = new URLSearchParams();
+  if (session) q.set("session", session);
+  const res = await fetch(`${API_BASE}/api/airports/${identifier}/telemetry/legs/${encodeURIComponent(legId)}?${q}`);
+  if (!res.ok) throw new Error(`telemetry leg failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchTelemetrySchema() {
+  const res = await fetch(`${API_BASE}/api/telemetry/schema`);
+  if (!res.ok) throw new Error(`telemetry schema failed: ${res.status}`);
+  return res.json();
+}
+
+export function telemetrySocketUrl(identifier, session) {
+  const q = session ? `?session=${encodeURIComponent(session)}` : "";
+  return `${WS_BASE}/ws/telemetry/${identifier}${q}`;
+}
+
+export function sessionFromQuery() {
+  return new URLSearchParams(window.location.search).get("session");
 }
 
 export { API_BASE };
