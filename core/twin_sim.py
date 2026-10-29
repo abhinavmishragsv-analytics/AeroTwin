@@ -70,10 +70,55 @@ from core.geo import (
     smooth_path,
 )
 from core.models import registry
+from core.telemetry import TelemetryRecorder
 
 KT = 0.514444          # knots -> m/s
 FPM = 0.00508          # feet/min -> m/s
 MAX_TURN_RATE_DEG_S = 12.0
+
+FLARE_START_M = 220.0     # ground distance before touchdown at which the flare begins
+FLARE_END_SLOPE = 0.25    # fraction of the glideslope descent rate left at touchdown
+
+
+def _flared_alt(remaining_m, gs_tan):
+    """Height above the runway `remaining_m` before touchdown.
+
+    On the glideslope this is simply remaining * tan(3 deg). Over the last
+    FLARE_START_M it is eased so the descent rate at touchdown is a quarter of
+    the glideslope rate (~190 fpm instead of ~750 fpm) - a flare, which is what
+    makes touchdown sink rate and touchdown g in the telemetry meaningful. The
+    curve is continuous with the glideslope at FLARE_START_M and never reaches
+    the runway before the threshold, so the approach geometry is unchanged.
+    """
+    r = max(0.0, remaining_m)
+    if r >= FLARE_START_M:
+        return r * gs_tan
+    return r * gs_tan * (FLARE_END_SLOPE + (1.0 - FLARE_END_SLOPE) * (r / FLARE_START_M))
+
+
+def _final_alt_fn(gs_tan):
+    """Altitude profile for the final-approach descent.
+
+    Normally the aircraft is already on the glideslope and this is just the
+    flared glideslope. If it comes off a holding level that is *above* the
+    glideslope at the point it turns final (hold levels sit at 1000-1650 m, the
+    glideslope there is ~390 m), the old code snapped it onto the glideslope in
+    a single step. Here the excess height is bled off over the first part of
+    the final instead, so altitude is continuous.
+    """
+    def make(entry_alt):
+        def fn(p, s, t):
+            base = _flared_alt(t - s, gs_tan)
+            extra0 = entry_alt - t * gs_tan
+            if extra0 < 25.0:
+                return base
+            s_c = min(t * 0.75, max(extra0 / 0.12, 1500.0))
+            if s >= s_c:
+                return base
+            return base + extra0 * (1.0 - s / s_c)
+        return fn
+    return make
+
 
 DESTINATIONS = ["VIDP", "VABB", "VOBL", "VOMM", "VOHS", "VECC", "VAAH", "VOGO", "VOCI", "VIJP"]
 
@@ -179,6 +224,9 @@ class Aerodrome:
 
         for _c in self.runway_ctls.values():
             _c.select_active_end(self.weather["wind_dir_deg"], self.weather["wind_kt"])
+        # Flight-data recorder: samples every flight at 1 Hz of simulated time
+        # into per-leg (arrival / departure) logs - see core/telemetry.py.
+        self.telemetry = TelemetryRecorder(env, self)
         self._seed_apron()
 
     # =====================================================================
@@ -522,6 +570,7 @@ class Aerodrome:
             delta = heading_delta(f["heading"], brg)
             f["heading"] = (f["heading"] + max(-max_turn, min(max_turn, delta))) % 360.0
             f["speed"] = int(round(v / KT))
+            f["_gs"] = v / KT          # un-rounded, for telemetry
             progress = s / total
             if alt_fn is not None:
                 f["altitude"] = round(max(0.0, alt_fn(progress, s, total)), 1)
@@ -534,7 +583,10 @@ class Aerodrome:
             if on_progress is not None:
                 on_progress(progress, s, total)
             yield self.env.timeout(STEP_DT)
-        f["speed"] = int(round(v_exit))
+        # v_exit is in m/s; `speed` is knots. (This used to store m/s, which
+        # showed up as a speed glitch at the end of every leg.)
+        f["speed"] = int(round(v_exit / KT))
+        f["_gs"] = v_exit / KT
 
     def _hold_position(self, f, seconds, status=None, reason=None):
         """Stop where you are. Used for holding short, waiting on separation,
@@ -556,9 +608,21 @@ class Aerodrome:
         for i in range(steps + 1):
             ang = (start_brg + 360.0 * turns * i / steps) % 360.0
             pts.append(destination(center, ang, radius))
+        # Join the orbit's level at a realistic rate instead of snapping to it
+        # (the first step of the orbit used to teleport the aircraft to
+        # `altitude`), and carry the current speed in rather than restarting
+        # from the orbit speed.
+        a0 = f["altitude"]
+        v_orbit = max(1.0, speed_kt * KT)
+        max_rate = 14.0     # m/s, ~2750 fpm
+
+        def _orbit_alt(p, s, t):
+            d = altitude - a0
+            return a0 + math.copysign(min(abs(d), max_rate * s / v_orbit), d)
+
         yield from self._traverse(
             f, pts, speed_kt, speed_kt, speed_kt, accel=0.8, decel=0.8,
-            alt_fn=lambda p, s, t: altitude,
+            alt_fn=_orbit_alt,
             pitch_fn=lambda p: 0.0,
             roll_fn=lambda p: 22.0,
         )
@@ -793,7 +857,11 @@ class Aerodrome:
                                                   max(1.0, ac.approach_speed_kt * KT))
                     f["status"] = "approach"
                     f["cleared_to"] = f"number {len(ctl.arrival_sequence)} for {end.ident}"
-                    radius, alt = _hold_geometry()
+                    # Wait for the runway at the height we are already at (the
+                    # glideslope intercept), not back up at the hold level:
+                    # the orbit used to teleport the aircraft ~650 m upwards.
+                    radius, _ = _hold_geometry()
+                    alt = f["altitude"]
                     while not req.triggered and self.env.now < deadline:
                         # A quarter orbit at a time, so the decision to go
                         # around is never more than a few seconds late.
@@ -874,7 +942,7 @@ class Aerodrome:
                 f, [(f["lat"], f["lng"]), end.threshold],
                 ac.approach_speed_kt + 15, ac.approach_speed_kt + 10, ac.approach_speed_kt,
                 accel=0.5, decel=0.5,
-                alt_fn=lambda p, s, t: max(0.0, (t - s) * gs),
+                alt_fn=_final_alt_fn(gs)(f["altitude"]),
                 pitch_fn=lambda p: -2.5 if p < 0.92 else 4.0,
                 roll_fn=lambda p: 0.0,
             )
@@ -1265,7 +1333,18 @@ class Aerodrome:
         f["status"] = "scheduled"
         f["hold_reason"] = "awaiting pushback clearance"
         push_keys = self.ground.route_keys(route)
-        while not self.ground.try_acquire(fid, push_keys):
+        while True:
+            # A ground stop that begins while this aircraft is already waiting
+            # for its clearance must hold it too: the stop is only checked once,
+            # up above, so without this an aircraft that was a few seconds past
+            # that check could still push back minutes into the stop.
+            if self.ground_stop:
+                f["hold_reason"] = self.ground_stop_reason or "ATC ground stop"
+                yield self.env.timeout(10)
+                continue
+            if self.ground.try_acquire(fid, push_keys):
+                break
+            f["hold_reason"] = "awaiting pushback clearance"
             yield self.env.timeout(10)
         f["hold_reason"] = None
 

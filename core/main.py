@@ -27,6 +27,7 @@ from core import airports
 from core.aircraft import FLEET
 from core.config import ARRIVAL_SHARE, DISRUPTION_MAX_MINUTES, STREAM_HZ, TIME_COMPRESSION
 from core.models import registry
+from core.telemetry import CHANNELS
 from core.twin_sim import Aerodrome
 
 logger = logging.getLogger("aerotwin.main")
@@ -60,6 +61,9 @@ class AirportTwin:
         self.env = simpy.Environment()
         self.sim = Aerodrome(self.env, self.layout)
         self.clients: set[WebSocket] = set()
+        # Telemetry pages watching this twin. They don't receive traffic
+        # frames, but they must keep the twin alive the same way a map does.
+        self.aux_clients: set[WebSocket] = set()
         self._tasks = []
         self._started = False
         self._wall_start = time.monotonic()
@@ -207,7 +211,7 @@ class TwinRegistry:
     def note_disconnect(self, icao: str, session: str | None):
         key = self._key(icao, session)
         twin = self._twins.get(key)
-        if twin is not None and not twin.clients:
+        if twin is not None and not twin.clients and not twin.aux_clients:
             self._empty_since[key] = time.monotonic()
 
     async def sweep(self):
@@ -218,7 +222,7 @@ class TwinRegistry:
             if twin is None:
                 self._empty_since.pop(key, None)
                 continue
-            if twin.clients:
+            if twin.clients or twin.aux_clients:
                 self._empty_since.pop(key, None)
                 continue
             if now - since >= self.GRACE_S:
@@ -231,7 +235,7 @@ class TwinRegistry:
         return self._twins.get(self._key(icao, session))
 
     def live(self):
-        return {k: len(v.clients) for k, v in self._twins.items()}
+        return {k: len(v.clients) + len(v.aux_clients) for k, v in self._twins.items()}
 
 
 twins = TwinRegistry()
@@ -358,6 +362,137 @@ async def disrupt(identifier: str, req: DisruptionRequest):
 async def disrupt_default(req: DisruptionRequest):
     """Kept so the older single-airport client keeps working."""
     return await disrupt(airports.DEFAULT_ICAO, req)
+
+
+# ---------------------------------------------------------------------------
+# Telemetry - the read side of the flight-data recorder (core/telemetry.py)
+# ---------------------------------------------------------------------------
+@app.get("/api/telemetry/schema")
+async def telemetry_schema():
+    """Channel catalogue: label, unit, provenance (sim / derived / model)."""
+    return {"channels": [
+        {"name": n, "label": lbl, "unit": u, "source": src, "group": g}
+        for n, lbl, u, src, g in CHANNELS]}
+
+
+async def _telemetry_twin(identifier: str, session: str | None):
+    try:
+        icao = airports.resolve(identifier)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"unknown airport {identifier!r}")
+    if session:
+        # A telemetry page only ever looks at a simulation that already
+        # exists; creating a fresh, empty one for a stale session id would
+        # just show an empty page that looks like a bug.
+        twin = twins.peek(icao, session)
+        if twin is None:
+            raise HTTPException(status_code=404, detail="session_not_found")
+        return twin
+    return await twins.get(icao)
+
+
+@app.get("/api/airports/{identifier}/telemetry/legs")
+async def telemetry_legs(identifier: str, session: str | None = None,
+                         direction: str | None = None, state: str = "all"):
+    if direction is not None and direction not in ("ARR", "DEP"):
+        raise HTTPException(status_code=400, detail="direction must be ARR or DEP")
+    if state not in ("all", "completed", "live"):
+        raise HTTPException(status_code=400, detail="state must be all, completed or live")
+    twin = await _telemetry_twin(identifier, session)
+    return {"airport": twin.icao, "time": round(twin.env.now, 1),
+            "legs": twin.sim.telemetry.list(direction, state)}
+
+
+@app.get("/api/airports/{identifier}/telemetry/legs/{leg_id}")
+async def telemetry_leg(identifier: str, leg_id: str, session: str | None = None, since: int = 0):
+    twin = await _telemetry_twin(identifier, session)
+    data = twin.sim.telemetry.detail(leg_id, since)
+    if data is None:
+        raise HTTPException(status_code=404, detail=f"no telemetry for {leg_id!r}")
+    return data
+
+
+@app.websocket("/ws/telemetry/{identifier}")
+async def telemetry_stream(websocket: WebSocket, identifier: str, session: str | None = None):
+    """Live telemetry. The client sends {"op": "subscribe", "legs": [ids]};
+    the server pushes only the samples added since the last push for each
+    subscribed leg, plus a changed-summaries list for the flight picker."""
+    try:
+        icao = airports.resolve(identifier)
+    except KeyError:
+        await websocket.close(code=4004)
+        return
+    twin = twins.peek(icao, session) if session else await twins.get(icao)
+    await websocket.accept()
+    if twin is None:
+        await websocket.send_json({"kind": "error", "error": "session_not_found"})
+        await websocket.close(code=4404)
+        return
+    twin.aux_clients.add(websocket)
+    rec = twin.sim.telemetry
+    subs: dict[str, int] = {}          # leg id -> samples already sent
+    finished_sent: set[str] = set()
+    sent_state: dict[str, str] = {}
+
+    async def reader():
+        try:
+            while True:
+                msg = await websocket.receive_json()
+                if msg.get("op") == "subscribe":
+                    wanted = [str(x) for x in (msg.get("legs") or [])][:8]
+                    for k in list(subs):
+                        if k not in wanted:
+                            subs.pop(k, None)
+                            finished_sent.discard(k)
+                    for k in wanted:
+                        subs.setdefault(k, 0)
+        except (WebSocketDisconnect, Exception):  # noqa: BLE001
+            return
+
+    reader_task = asyncio.create_task(reader())
+    try:
+        await websocket.send_json({"kind": "legs", "time": round(twin.env.now, 1),
+                                   "legs": rec.list()})
+        for s in rec.list():
+            sent_state[s["id"]] = f"{s['outcome']}:{s['n'] if s['live'] else 0}"
+        tick = 0
+        while not reader_task.done():
+            await asyncio.sleep(0.25)
+            tick += 1
+            for leg_id, n_sent in list(subs.items()):
+                leg = rec.get(leg_id)
+                if leg is None:
+                    continue
+                if not leg.live and leg_id in finished_sent:
+                    continue
+                n_now = len(leg)
+                if n_now == n_sent and leg.live:
+                    continue
+                data = rec.detail(leg_id, max(0, n_sent - 3))
+                if data is None:
+                    continue
+                await websocket.send_json({"kind": "leg", "data": data})
+                subs[leg_id] = n_now
+                if not leg.live:
+                    finished_sent.add(leg_id)
+            if tick % 4 == 0:
+                changed = []
+                for s in rec.list():
+                    key = f"{s['outcome']}:{s['n'] if s['live'] else 0}"
+                    if sent_state.get(s["id"]) != key:
+                        sent_state[s["id"]] = key
+                        changed.append(s)
+                if changed:
+                    await websocket.send_json({"kind": "legs_delta", "time": round(twin.env.now, 1),
+                                               "legs": changed})
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:  # noqa: BLE001
+        logger.info("%s telemetry client disconnected: %s", icao, exc)
+    finally:
+        reader_task.cancel()
+        twin.aux_clients.discard(websocket)
+        twins.note_disconnect(icao, session)
 
 
 # ---------------------------------------------------------------------------
