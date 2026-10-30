@@ -2,7 +2,10 @@
  * Telemetry helpers: palette, x-axis alignment, and merging of the per-flight
  * series into the single shared x array uPlot needs.
  */
-export const PALETTE = ["#4da3ff", "#f5a524", "#34d399", "#f472b6", "#a78bfa", "#f87171"];
+// Series colours tuned for white paper: each keeps >= 3:1 against it and stays
+// distinguishable for the common colour-vision deficiencies (blue / orange /
+// green / magenta differ in lightness as well as hue).
+export const PALETTE = ["#1F5FBF", "#E4630D", "#0E8F6E", "#C2257C", "#6A4BD1", "#0F8CA8"];
 export const MAX_COMPARE = 6;
 
 export const EVENT_OPTIONS = {
@@ -36,11 +39,11 @@ export const PHASE_LABEL = {
 };
 
 export const PHASE_COLOR = {
-  pushback: "#64748b", taxi_out: "#94a3b8", hold_short: "#f59e0b", lineup: "#fbbf24",
-  takeoff_roll: "#f97316", climb: "#34d399", airborne: "#34d399",
-  inbound: "#60a5fa", holding: "#a78bfa", approach: "#38bdf8", go_around: "#f472b6",
-  final: "#22d3ee", landing_rollout: "#f97316", runway_vacate: "#fbbf24", taxi_in: "#94a3b8",
-  turnaround: "#64748b", parked: "#475569", diverted: "#f87171", scheduled: "#64748b",
+  pushback: "#5B6B82", taxi_out: "#6F83A0", hold_short: "#B7791F", lineup: "#C28A12",
+  takeoff_roll: "#D9560B", climb: "#0E8F6E", airborne: "#0E8F6E",
+  inbound: "#2F6FD0", holding: "#6A4BD1", approach: "#0F8CA8", go_around: "#C2257C",
+  final: "#0B7A94", landing_rollout: "#D9560B", runway_vacate: "#C28A12", taxi_in: "#6F83A0",
+  turnaround: "#5B6B82", parked: "#4A5A70", diverted: "#C83A3A", scheduled: "#5B6B82",
 };
 
 export const STEPPED = new Set(["flaps_pct", "gear", "spoilers_pct", "reverse"]);
@@ -150,9 +153,10 @@ export const hoverBus = {
   get() { return this.x; },
 };
 
-/** viridis-ish ramp, t in [0,1] */
+/** Slow-to-fast ramp for the speed-coloured track, readable on white:
+ *  steel blue (taxi) -> royal blue -> violet -> chart magenta (fastest). */
 export function ramp(t) {
-  const stops = [[68, 1, 84], [59, 82, 139], [33, 144, 141], [93, 201, 99], [253, 231, 37]];
+  const stops = [[132, 170, 208], [58, 128, 200], [30, 86, 168], [110, 56, 156], [194, 37, 124]];
   const x = Math.min(0.999, Math.max(0, t)) * (stops.length - 1);
   const i = Math.floor(x), f = x - i;
   const c = stops[i].map((v, k) => Math.round(v + (stops[i + 1][k] - v) * f));

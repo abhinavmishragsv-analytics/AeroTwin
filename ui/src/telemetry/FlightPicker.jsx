@@ -2,9 +2,9 @@ import { useMemo, useState } from "react";
 import { MAX_COMPARE, fmtDuration } from "./lib";
 
 const OUTCOME = {
-  landed: { text: "LANDED", cls: "ok" }, departed: { text: "DEPARTED", cls: "ok" },
-  diverted: { text: "DIVERTED", cls: "bad" }, cancelled: { text: "CANCELLED", cls: "bad" },
-  aborted: { text: "ENDED", cls: "dim" }, live: { text: "LIVE", cls: "live" },
+  landed: { text: "Landed", cls: "ok" }, departed: { text: "Departed", cls: "ok" },
+  diverted: { text: "Diverted", cls: "bad" }, cancelled: { text: "Cancelled", cls: "bad" },
+  aborted: { text: "Ended", cls: "dim" }, live: { text: "Live", cls: "live" },
 };
 
 export default function FlightPicker({ legs, direction, selected, colors, onToggle, onClear, filter, setFilter }) {
@@ -45,8 +45,8 @@ export default function FlightPicker({ legs, direction, selected, colors, onTogg
           const disabled = !on && full;
           return (
             <button key={l.id} className={`tm-leg ${on ? "on" : ""}`} disabled={disabled}
-              style={on ? { borderColor: colors[l.id] } : undefined} onClick={() => onToggle(l.id)}>
-              <span className="tm-swatch" style={{ background: on ? colors[l.id] : "transparent", borderColor: on ? colors[l.id] : "rgba(255,255,255,0.25)" }} />
+              style={on ? { "--leg": colors[l.id] } : undefined} onClick={() => onToggle(l.id)}>
+              <span className="tm-swatch" style={{ background: on ? colors[l.id] : "transparent", borderColor: on ? colors[l.id] : "#B7C3D4" }} />
               <span className="tm-leg-main">
                 <span className="tm-leg-row1">
                   <b>{l.flight}</b><span className="tm-leg-type">{l.type}</span>

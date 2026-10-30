@@ -55,7 +55,7 @@ function TrackMap({ flights }) {
   return (
     <div className="tm-map">
       <div className="tm-map-head">
-        <span>Ground track</span>
+        <span className="tm-map-title">Ground track</span>
         <span className="tm-map-opts">
           <label className="tm-check"><input type="checkbox" checked={zoomAirfield} onChange={(e) => setZoomAirfield(e.target.checked)} /> zoom to airfield</label>
           {single && (
@@ -66,11 +66,11 @@ function TrackMap({ flights }) {
       <svg viewBox={`${bx} ${by} ${bw} ${bh}`} preserveAspectRatio="xMidYMid slice" className="tm-map-svg" style={{ overflow: "hidden" }}>
         {geo.runway && (
           <line x1={geo.runway[0][0]} y1={geo.runway[0][1]} x2={geo.runway[1][0]} y2={geo.runway[1][1]}
-            stroke="#2a3446" strokeWidth={sw * 14} strokeLinecap="butt" />
+            stroke="#C3CCD9" strokeWidth={sw * 14} strokeLinecap="butt" />
         )}
         {geo.runway && (
           <line x1={geo.runway[0][0]} y1={geo.runway[0][1]} x2={geo.runway[1][0]} y2={geo.runway[1][1]}
-            stroke="#546178" strokeWidth={sw * 1.2} strokeDasharray={`${sw * 8} ${sw * 8}`} />
+            stroke="#FFFFFF" strokeWidth={sw * 1.4} strokeDasharray={`${sw * 8} ${sw * 8}`} />
         )}
         {flights.map((f) => {
           const d = f.detail;
@@ -96,7 +96,7 @@ function TrackMap({ flights }) {
           return (
             <g key={f.id}>
               <circle cx={p[0]} cy={p[1]} r={sw * 9} fill={f.color} opacity="0.25" />
-              <circle cx={p[0]} cy={p[1]} r={sw * 4.2} fill={f.color} stroke="#0a0e14" strokeWidth={sw} />
+              <circle cx={p[0]} cy={p[1]} r={sw * 4.2} fill={f.color} stroke="#FFFFFF" strokeWidth={sw * 1.2} />
             </g>
           );
         })}

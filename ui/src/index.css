@@ -202,3 +202,7 @@ body { font-family: "Inter", system-ui, sans-serif; color: #e6ecf5; }
   color: #78c8ff; cursor: pointer; transition: background 0.15s;
 }
 .strip-tm-btn:hover { background: rgba(77,163,255,0.38); color: #fff; }
+
+/* Shown while the lazily loaded telemetry chunk (and its stylesheet) arrives:
+   light and full-screen, so the page never flashes dark first. */
+.tm-loading { position: fixed; inset: 0; display: grid; place-items: center; background: #F2F5F9; color: #5B6B82; font: 500 14px "Hanken Grotesk", Inter, system-ui, sans-serif; }

@@ -182,7 +182,7 @@ export default function TelemetryPage() {
         const x = [], y = [];
         for (let v = -9000; v <= 0; v += 100) { x.push(v); y.push(-v * Math.tan((3 * Math.PI) / 180) * 3.28084); }
         extra = { x, y };
-        series.push({ id: "gs3", label: "3° glideslope", short: "3° path", color: "#7b8aa3", dashed: true });
+        series.push({ id: "gs3", label: "3° glideslope", short: "3° path", color: "#6B7A90", dashed: true });
       }
       const data = buildChannelData(flights, name, extra);
       const decor = { hlines: [], events: [], hbands: [] };
@@ -193,8 +193,8 @@ export default function TelemetryPage() {
           else decor.hlines.push({ y: r.vr, color: f.color, label: `VR ${f.detail.meta.type}` });
         });
       }
-      if (name === "vs_fpm" && direction === "ARR") decor.hlines.push({ y: -1000, color: "#f5a524", label: "stabilised-approach limit" });
-      if (name === "gs_dev" || name === "loc_dev") decor.hbands.push({ y0: -1, y1: 1, color: "rgba(52,211,153,0.08)" });
+      if (name === "vs_fpm" && direction === "ARR") decor.hlines.push({ y: -1000, color: "#B7791F", label: "stabilised-approach limit" });
+      if (name === "gs_dev" || name === "loc_dev") decor.hbands.push({ y0: -1, y1: 1, color: "rgba(14,143,110,0.10)" });
       if (mode === "time") {
         const keep = direction === "ARR" ? ["go_around", "touchdown", "runway_clear"] : ["brake_release", "liftoff", "alt_1000"];
         flights.forEach((f) => (f.detail.events || []).filter((e) => keep.includes(e.name)).forEach((e) =>
@@ -260,8 +260,13 @@ export default function TelemetryPage() {
   return (
     <div className="tm-root">
       <header className="tm-header">
-        <div className="tm-brand"><span className="tm-logo">AeroTwin</span><span className="tm-sep">/</span><span>Flight telemetry</span>
-          {airportName && <span className="tm-airport">{airportName}</span>}</div>
+        <div className="tm-brand">
+          <Mark />
+          <span className="tm-logo">AeroTwin</span>
+          <span className="tm-sep" aria-hidden="true">/</span>
+          <h1 className="tm-title">Flight telemetry</h1>
+          {airportName && <span className="tm-airport">{airportName}</span>}
+        </div>
         <div className="tm-dirs" role="tablist">
           {[["ARR", "Arrivals", "↓"], ["DEP", "Departures", "↑"]].map(([d, label, arrow]) => (
             <button key={d} role="tab" aria-selected={direction === d} className={direction === d ? "on" : ""} onClick={() => setDirection(d)}>
@@ -307,7 +312,7 @@ export default function TelemetryPage() {
               <button className="tm-chip reset" onClick={() => setVis(ESSENTIALS[direction])}>Essentials</button>
             </div>
             <div className="tm-group">
-              {anyLive && <span className="tm-livebadge"><i />LIVE</span>}
+              {anyLive && <span className="tm-livebadge"><i />Live</span>}
               <button className="tm-btn ghost" disabled={!flights.length} onClick={exportCsv}>Export CSV</button>
             </div>
           </div>
@@ -316,6 +321,7 @@ export default function TelemetryPage() {
             <div className="tm-pending">Waiting for <b>{selIds.join(", ")}</b> to start recording… it appears as soon as the aircraft begins moving.</div>
           ) : flights.length === 0 ? (
             <div className="tm-hero">
+              <HeroProfile direction={direction} />
               <h2>{direction === "ARR" ? "Analyse arrivals" : "Analyse departures"}</h2>
               <p>
                 {direction === "ARR"
@@ -369,11 +375,11 @@ function FlightCard({ f, direction }) {
   const m = f.detail.meta;
   const conds = m.conditions || [];
   return (
-    <div className="tm-fcard" style={{ borderTopColor: f.color }}>
+    <div className="tm-fcard" style={{ "--tab": f.color }}>
       <div className="tm-fcard-top">
         <span className="tm-swatch" style={{ background: f.color, borderColor: f.color }} />
         <b>{f.detail.flight}</b>
-        {f.detail.live ? <span className="tm-badge live">LIVE</span> : <span className="tm-badge ok">{f.detail.outcome.toUpperCase()}</span>}
+        {f.detail.live ? <span className="tm-badge live">Live</span> : <span className="tm-badge ok">{f.detail.outcome}</span>}
       </div>
       <div className="tm-fcard-sub">{m.type_name} · {m.flight_number}</div>
       <div className="tm-fcard-grid">
@@ -391,5 +397,69 @@ function FlightCard({ f, direction }) {
         </div>
       )}
     </div>
+  );
+}
+
+/** Small compass-rose mark: graticule circle, cardinal ticks, magenta needle. */
+function Mark() {
+  return (
+    <svg className="tm-mark" viewBox="0 0 32 32" width="30" height="30" aria-hidden="true">
+      <circle cx="16" cy="16" r="13" fill="none" stroke="currentColor" strokeWidth="1.4" />
+      <path d="M16 1.5v5M16 25.5v5M1.5 16h5M25.5 16h5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+      <path d="M16 6.5l3.2 9.5L16 25.5 12.8 16z" fill="var(--magenta)" />
+      <circle cx="16" cy="16" r="1.7" fill="var(--paper)" />
+    </svg>
+  );
+}
+
+/**
+ * A drawn altitude-against-distance profile: what the page measures, shown
+ * before there is anything to plot. Arrivals: glideslope with the 1000 / 500 ft
+ * gates, flare, touchdown and rollout. Departures: roll, rotate, lift-off and
+ * climb. Purely illustrative - not to scale.
+ */
+function HeroProfile({ direction }) {
+  const arr = direction === "ARR";
+  return (
+    <svg className="tm-profile" viewBox="0 0 560 150" role="img"
+      aria-label={arr ? "Illustration of an approach, flare, touchdown and rollout" : "Illustration of a take-off roll, rotation and climb"}>
+      <line x1="10" y1="118" x2="550" y2="118" className="pf-ground" />
+      {arr ? (
+        <>
+          <rect x="296" y="115" width="236" height="6" rx="1" className="pf-runway" />
+          <line x1="304" y1="118" x2="524" y2="118" className="pf-centre" />
+          <path d="M20 20L290 111Q298 116 306 118" className="pf-path" />
+          <path d="M306 118L470 118" className="pf-roll" markerEnd="url(#pf-arrow)" />
+          <g className="pf-dot"><circle cx="150" cy="64" r="4" /><circle cx="222" cy="88" r="4" /><circle cx="306" cy="118" r="5" className="pf-key" /></g>
+          <g className="pf-text">
+            <text x="138" y="50" textAnchor="end">1000 ft gate</text>
+            <text x="210" y="74" textAnchor="end">500 ft gate</text>
+            <text x="296" y="106" textAnchor="end">Touchdown</text>
+            <text x="410" y="138" textAnchor="middle">Rollout and braking</text>
+            <text x="20" y="46">Approach on a 3° path</text>
+          </g>
+        </>
+      ) : (
+        <>
+          <rect x="30" y="115" width="260" height="6" rx="1" className="pf-runway" />
+          <line x1="38" y1="118" x2="282" y2="118" className="pf-centre" />
+          <path d="M52 118L250 118" className="pf-roll" markerEnd="url(#pf-arrow)" />
+          <path d="M272 118C330 112 392 82 540 26" className="pf-path" />
+          <g className="pf-dot"><circle cx="52" cy="118" r="4" /><circle cx="250" cy="118" r="4" /><circle cx="272" cy="118" r="5" className="pf-key" /><circle cx="440" cy="58" r="4" /></g>
+          <g className="pf-text">
+            <text x="52" y="136">Brake release</text>
+            <text x="244" y="106" textAnchor="end">Rotate</text>
+            <text x="284" y="136">Lift-off</text>
+            <text x="428" y="42" textAnchor="end">Climbing through 1000 ft</text>
+            <text x="150" y="106" textAnchor="middle">Take-off roll</text>
+          </g>
+        </>
+      )}
+      <defs>
+        <marker id="pf-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M1 1.5L8.5 5 1 8.5z" className="pf-arrowhead" />
+        </marker>
+      </defs>
+    </svg>
   );
 }

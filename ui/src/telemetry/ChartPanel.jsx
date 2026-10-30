@@ -4,8 +4,8 @@ import "uplot/dist/uPlot.min.css";
 import { STEPPED, fmt, hoverBus } from "./lib";
 
 const SYNC = uPlot.sync("aerotwin-tm");
-const AXIS = "#8fa1bb";
-const GRID = "rgba(255,255,255,0.06)";
+const AXIS = "#5B6B82";
+const GRID = "rgba(19,35,59,0.09)";
 
 /**
  * One telemetry channel, one trace per compared flight, sharing a crosshair
@@ -36,11 +36,18 @@ function ChartPanel({ channel, label, unit, source, series, data, xLabel, decor,
         drag: { x: true, y: false, setScale: true },
         points: { size: 7 },
       },
-      scales: { x: { time: false } },
+      scales: {
+        x: { time: false },
+        // Deviation scales always show the +-1 dot "stable" band, even when
+        // the aircraft hugged the beam and the data span a hundredth of a dot.
+        ...(channel === "gs_dev" || channel === "loc_dev"
+          ? { y: { range: (u, min, max) => [Math.min(min ?? 0, -1.5), Math.max(max ?? 0, 1.5)] } }
+          : {}),
+      },
       axes: [
-        { stroke: AXIS, grid: { stroke: GRID, width: 1 }, ticks: { stroke: GRID }, font: "11px Inter, system-ui", size: 34,
+        { stroke: AXIS, grid: { stroke: GRID, width: 1 }, ticks: { stroke: GRID }, font: "11px Hanken Grotesk, Inter, system-ui", size: 34,
           values: (u, vals) => vals.map((v) => fmt(v, 0)) },
-        { stroke: AXIS, grid: { stroke: GRID, width: 1 }, ticks: { stroke: GRID }, font: "11px Inter, system-ui", size: 58,
+        { stroke: AXIS, grid: { stroke: GRID, width: 1 }, ticks: { stroke: GRID }, font: "11px Hanken Grotesk, Inter, system-ui", size: 58,
           values: (u, vals) => vals.map((v) => fmt(v, Math.abs(v) < 10 && v % 1 ? 2 : 0)) },
       ],
       series: [
@@ -65,7 +72,7 @@ function ChartPanel({ channel, label, unit, source, series, data, xLabel, decor,
           cells.forEach((c) => {
             const si = Number(c.dataset.si);
             const v = i == null ? null : u.data[si + 1]?.[i];
-            c.textContent = v == null ? "—" : fmt(v, Math.abs(v) < 10 ? 2 : 1);
+            c.textContent = v == null ? "" : fmt(v, Math.abs(v) < 10 ? 2 : 1);
           });
         }],
         draw: [(u) => {
@@ -86,7 +93,7 @@ function ChartPanel({ channel, label, unit, source, series, data, xLabel, decor,
               ctx.fillRect(x0, top, Math.max(1, x1 - x0), h);
               if (d.bandLabels && x1 - x0 > 46 * dpr) {
                 ctx.fillStyle = b.color + "cc";
-                ctx.font = `${10 * dpr}px Inter, system-ui`;
+                ctx.font = `${10 * dpr}px Hanken Grotesk, Inter, system-ui`;
                 ctx.fillText(b.label, x0 + 4 * dpr, top + 12 * dpr);
               }
             }
@@ -99,7 +106,7 @@ function ChartPanel({ channel, label, unit, source, series, data, xLabel, decor,
             ctx.setLineDash([4 * dpr, 4 * dpr]);
             ctx.beginPath(); ctx.moveTo(left, y); ctx.lineTo(left + width, y); ctx.stroke();
             ctx.setLineDash([]);
-            ctx.fillStyle = r.color; ctx.font = `${9.5 * dpr}px Inter, system-ui`;
+            ctx.fillStyle = r.color; ctx.font = `${9.5 * dpr}px Hanken Grotesk, Inter, system-ui`;
             ctx.textAlign = "right";
             ctx.fillText(r.label, left + width - 4 * dpr, y - 3 * dpr);
             ctx.textAlign = "left";
@@ -121,14 +128,14 @@ function ChartPanel({ channel, label, unit, source, series, data, xLabel, decor,
               ctx.save();
               ctx.translate(x - 3 * dpr, top + h - 4 * dpr);
               ctx.rotate(-Math.PI / 2);
-              ctx.fillStyle = e.color; ctx.font = `${9.5 * dpr}px Inter, system-ui`;
+              ctx.fillStyle = e.color; ctx.font = `${9.5 * dpr}px Hanken Grotesk, Inter, system-ui`;
               ctx.fillText(e.label, 0, 0);
               ctx.restore();
             }
           }
           if (d.zero != null) {
             const x = px(d.zero);
-            ctx.strokeStyle = "rgba(255,255,255,0.35)"; ctx.lineWidth = dpr;
+            ctx.strokeStyle = "rgba(19,35,59,0.45)"; ctx.lineWidth = dpr;
             ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x, top + h); ctx.stroke();
           }
           ctx.restore();
@@ -169,7 +176,7 @@ function ChartPanel({ channel, label, unit, source, series, data, xLabel, decor,
           {series.filter((s) => !s.dashed).map((s) => (
             <span key={s.id} className="tm-legend-item" style={{ color: s.color }}>
               <i style={{ background: s.color }} />{s.short}
-              <b data-si={series.indexOf(s)}>—</b>
+              <b data-si={series.indexOf(s)}></b>
             </span>
           ))}
         </div>
